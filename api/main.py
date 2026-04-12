@@ -53,6 +53,9 @@ class SearchRequest(BaseModel):
     occupancy: str = "any"
     brokerage: str = "any"
     destination_address: Optional[str] = None
+    # New fields from redesigned form
+    flat_type: str = "whole"          # 'whole' | 'preoccupied'
+    flatmate_gender: str = "any"      # 'any' | 'male' | 'female' | 'same'
 
 
 class StatusResponse(BaseModel):
@@ -83,6 +86,8 @@ def run_pipeline(session_id: str, prefs: dict):
             "occupancy": prefs["occupancy"],
             "brokerage": prefs["brokerage"],
             "destination_address": prefs.get("destination_address"),
+            "flat_type": prefs.get("flat_type", "whole"),
+            "flatmate_gender": prefs.get("flatmate_gender", "any"),
         }).execute()
 
         # 2. Scrape

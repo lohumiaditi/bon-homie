@@ -22,7 +22,10 @@ CREATE TABLE IF NOT EXISTS user_preferences (
 
     destination_address TEXT,             -- workplace / college / visit place
     destination_lat     FLOAT,
-    destination_lng     FLOAT
+    destination_lng     FLOAT,
+
+    flat_type       TEXT NOT NULL DEFAULT 'whole',  -- 'whole' | 'preoccupied'
+    flatmate_gender TEXT NOT NULL DEFAULT 'any'     -- 'any' | 'male' | 'female' | 'same'
 );
 
 -- 2. Raw Listings (all scraped, before filtering)
