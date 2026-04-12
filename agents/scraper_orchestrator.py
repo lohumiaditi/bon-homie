@@ -1,17 +1,18 @@
 """
 Scraper Orchestrator
 --------------------
-Runs all site scrapers in parallel and deduplicates results.
+Runs all site scrapers in parallel using threads (sync Playwright).
+Deduplicates results across platforms.
 
 Run standalone:
     python agents/scraper_orchestrator.py
 """
 
-import asyncio
 import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from rapidfuzz import fuzz
 from agents.scrapers.ninetynineacres import NinetyNineAcresScraper
 from agents.scrapers.nobroker import NoBrokerScraper
@@ -21,16 +22,11 @@ from agents.scrapers.squareyards import SquareYardsScraper
 from agents.scrapers.facebook import scrape_facebook
 from agents.scrapers.base import save_listings
 
-
-DEDUP_THRESHOLD = 85  # fuzzywuzzy ratio — above this = duplicate
+DEDUP_THRESHOLD = 85
 
 
 def deduplicate(listings: list[dict]) -> list[dict]:
-    """
-    Remove near-duplicate listings across platforms.
-    Two listings are duplicates if their address similarity > DEDUP_THRESHOLD
-    AND prices are within 10% of each other.
-    """
+    """Remove near-duplicate listings across platforms."""
     unique = []
     for listing in listings:
         addr = (listing.get("address") or listing.get("area_name") or "").lower()
@@ -48,63 +44,52 @@ def deduplicate(listings: list[dict]) -> list[dict]:
     return unique
 
 
-async def run_async_scraper(scraper_cls, prefs: dict, max_pages: int = 2) -> list[dict]:
-    """Wrapper to run a single async scraper and catch errors."""
+def _run_scraper(scraper_cls, prefs: dict, max_pages: int = 2) -> list[dict]:
+    """Run one scraper in a thread, catch errors."""
     try:
         scraper = scraper_cls(headless=True)
-        return await scraper.scrape(prefs, max_pages=max_pages)
+        return scraper.scrape(prefs, max_pages=max_pages)
     except Exception as e:
         print(f"  [orchestrator] {scraper_cls.__name__} failed: {e}")
         return []
 
 
-async def scrape_all(prefs: dict) -> list[dict]:
+def orchestrate(prefs: dict) -> list[dict]:
     """
-    Run all scrapers concurrently and return deduplicated listings.
-    Facebook is sync (Apify API call) so it runs in a thread.
+    Run all scrapers in parallel threads and return deduplicated listings.
     """
-    print("\n[Orchestrator] Starting all scrapers...")
+    print("\n[Orchestrator] Starting all scrapers in parallel...")
 
-    # Run Playwright scrapers concurrently
-    # Note: Each scraper opens its own browser instance
-    playwright_tasks = [
-        run_async_scraper(NinetyNineAcresScraper, prefs),
-        run_async_scraper(NoBrokerScraper, prefs),
-        run_async_scraper(HousingScraper, prefs),
-        run_async_scraper(MagicBricksScraper, prefs),
-        run_async_scraper(SquareYardsScraper, prefs),
+    scraper_classes = [
+        NinetyNineAcresScraper,
+        NoBrokerScraper,
+        HousingScraper,
+        MagicBricksScraper,
+        SquareYardsScraper,
     ]
 
-    # Run Facebook in thread (sync Apify call)
-    loop = asyncio.get_event_loop()
-    fb_task = loop.run_in_executor(None, scrape_facebook, prefs)
-
-    # Gather all
-    results = await asyncio.gather(*playwright_tasks, return_exceptions=True)
-    fb_listings = await fb_task
-
     all_listings = []
-    scraper_names = ["99acres", "nobroker", "housing", "magicbricks", "squareyards"]
-    for name, result in zip(scraper_names, results):
-        if isinstance(result, Exception):
-            print(f"  [orchestrator] {name} raised: {result}")
-        else:
+
+    # Run Playwright scrapers in parallel threads
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {
+            executor.submit(_run_scraper, cls, prefs): cls.__name__
+            for cls in scraper_classes
+        }
+        for future in as_completed(futures):
+            name = futures[future]
+            result = future.result()
             print(f"  [orchestrator] {name}: {len(result)} listings")
             all_listings.extend(result)
 
+    # Facebook (Apify — sync HTTP call, run in main thread)
+    fb_listings = scrape_facebook(prefs)
     all_listings.extend(fb_listings)
-    print(f"\n[Orchestrator] Total raw: {len(all_listings)}")
 
-    # Deduplicate
+    print(f"\n[Orchestrator] Total raw: {len(all_listings)}")
     unique = deduplicate(all_listings)
     print(f"[Orchestrator] After dedup: {len(unique)} unique listings")
-
     return unique
-
-
-def orchestrate(prefs: dict) -> list[dict]:
-    """Sync wrapper — call this from non-async code."""
-    return asyncio.run(scrape_all(prefs))
 
 
 if __name__ == "__main__":

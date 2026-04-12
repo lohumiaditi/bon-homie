@@ -7,7 +7,6 @@ Run standalone:
     python agents/scrapers/magicbricks.py
 """
 
-import asyncio
 import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -81,27 +80,26 @@ def parse_listing_card(card_soup) -> dict:
 
 class MagicBricksScraper(BaseScraper):
 
-    async def scrape(self, prefs: dict, max_pages: int = 3) -> list[dict]:
+    def scrape(self, prefs: dict, max_pages: int = 3) -> list[dict]:
         listings = []
 
-        async with self as scraper:
+        with self as scraper:
             for page_num in range(1, max_pages + 1):
                 url = build_search_url(prefs)
                 if page_num > 1:
                     url += f"&page={page_num}"
 
-                ctx, page = await scraper.new_page()
+                ctx, page = scraper.new_page()
                 try:
                     print(f"  [magicbricks] Page {page_num}: {url[:80]}...")
-                    await page.goto(url, wait_until="domcontentloaded", timeout=35000)
-                    await scraper.random_delay(2.5, 5.0)
+                    page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                    scraper.random_delay(2.5, 5.0)
 
-                    # Scroll to trigger lazy images
                     for _ in range(4):
-                        await page.evaluate("window.scrollBy(0, 600)")
-                        await asyncio.sleep(0.6)
+                        page.evaluate("window.scrollBy(0, 600)")
+                        scraper.random_delay(0.4, 0.8)
 
-                    html = await page.content()
+                    html = page.content()
                     soup = BeautifulSoup(html, "html.parser")
 
                     cards = (
@@ -124,20 +122,16 @@ class MagicBricksScraper(BaseScraper):
                 except Exception as e:
                     print(f"  [magicbricks] Error page {page_num}: {e}")
                 finally:
-                    await ctx.close()
+                    ctx.close()
 
                 if page_num < max_pages:
-                    await scraper.random_delay(4.0, 7.0)
+                    scraper.random_delay(4.0, 7.0)
 
         return listings
 
 
-async def _test():
+if __name__ == "__main__":
     prefs = {"areas": ["Kothrud"], "budget_min": 10000, "budget_max": 25000, "furnishing": "any"}
     s = MagicBricksScraper(headless=True)
-    listings = await s.scrape(prefs, max_pages=1)
+    listings = s.scrape(prefs, max_pages=1)
     print(f"MagicBricks: {len(listings)} listings")
-
-
-if __name__ == "__main__":
-    asyncio.run(_test())

@@ -7,7 +7,6 @@ Run standalone:
     python agents/scrapers/housing.py
 """
 
-import asyncio
 import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -78,26 +77,26 @@ def parse_listing_card(card_soup) -> dict:
 
 class HousingScraper(BaseScraper):
 
-    async def scrape(self, prefs: dict, max_pages: int = 3) -> list[dict]:
+    def scrape(self, prefs: dict, max_pages: int = 3) -> list[dict]:
         listings = []
 
-        async with self as scraper:
+        with self as scraper:
             for page_num in range(1, max_pages + 1):
                 url = build_search_url(prefs)
                 if page_num > 1:
                     url += f"&page={page_num}"
 
-                ctx, page = await scraper.new_page()
+                ctx, page = scraper.new_page()
                 try:
                     print(f"  [housing] Page {page_num}: {url[:80]}...")
-                    await page.goto(url, wait_until="domcontentloaded", timeout=35000)
-                    await scraper.random_delay(2.0, 4.5)
+                    page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                    scraper.random_delay(2.0, 4.5)
 
                     for _ in range(3):
-                        await page.evaluate("window.scrollBy(0, 700)")
-                        await asyncio.sleep(0.7)
+                        page.evaluate("window.scrollBy(0, 700)")
+                        scraper.random_delay(0.5, 0.9)
 
-                    html = await page.content()
+                    html = page.content()
                     soup = BeautifulSoup(html, "html.parser")
 
                     cards = (
@@ -121,20 +120,16 @@ class HousingScraper(BaseScraper):
                 except Exception as e:
                     print(f"  [housing] Error page {page_num}: {e}")
                 finally:
-                    await ctx.close()
+                    ctx.close()
 
                 if page_num < max_pages:
-                    await scraper.random_delay(3.5, 6.0)
+                    scraper.random_delay(3.5, 6.0)
 
         return listings
 
 
-async def _test():
-    prefs = {"areas": ["Baner"], "budget_min": 10000, "budget_max": 25000, "furnishing": "any"}
-    scraper = HousingScraper(headless=True)
-    listings = await scraper.scrape(prefs, max_pages=1)
-    print(f"Housing: {len(listings)} listings, {sum(1 for l in listings if len(l['images']) >= 3)} with 3+ images")
-
-
 if __name__ == "__main__":
-    asyncio.run(_test())
+    prefs = {"areas": ["Baner"], "budget_min": 10000, "budget_max": 25000, "furnishing": "any"}
+    s = HousingScraper(headless=True)
+    listings = s.scrape(prefs, max_pages=1)
+    print(f"Housing: {len(listings)} listings, {sum(1 for l in listings if len(l['images']) >= 3)} with 3+ images")

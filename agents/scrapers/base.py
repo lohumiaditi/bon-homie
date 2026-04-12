@@ -1,16 +1,19 @@
 """
 Base Scraper
 ------------
-Shared Playwright setup, user-agent rotation, rate-limit delays,
-and the standard listing dict schema used by all scrapers.
+Shared Playwright setup using the SYNC API (no asyncio).
+This avoids all Windows + Python 3.14 event loop incompatibilities.
+
+All scrapers inherit BaseScraper and override scrape().
 """
 
-import asyncio
 import random
 import re
+import time
 import uuid
 from typing import Optional
-from playwright.async_api import async_playwright, Browser, BrowserContext, Page
+from playwright.sync_api import sync_playwright, Browser, BrowserContext, Page
+
 
 # ── Standard listing schema ───────────────────────────────────────────────────
 def empty_listing() -> dict:
@@ -20,7 +23,7 @@ def empty_listing() -> dict:
         "listing_id": "",
         "url": "",
         "title": "",
-        "price": None,           # int, monthly rent ₹
+        "price": None,           # int, monthly rent
         "area_name": "",
         "address": "",
         "city": "Pune",
@@ -75,33 +78,33 @@ def normalize_furnishing(text: str) -> Optional[str]:
 
 # ── Price extractor ───────────────────────────────────────────────────────────
 def extract_price(text: str) -> Optional[int]:
-    """Extract integer rent from strings like '₹12,500/mo' or '12500'."""
+    """Extract integer rent from short price strings like '12,500' or '12500'."""
     digits = re.sub(r"[^\d]", "", text)
     if digits:
         val = int(digits)
-        # Sanity check: rent should be between ₹1,000 and ₹5,00,000
         if 1_000 <= val <= 5_00_000:
             return val
     return None
 
 
-# ── Base browser context ──────────────────────────────────────────────────────
+# ── Base browser (SYNC) ───────────────────────────────────────────────────────
 class BaseScraper:
     """
-    Inherit from this. Override `scrape()`.
+    Sync Playwright scraper base class.
+
     Usage:
-        async with BaseScraper() as s:
-            listings = await s.scrape(prefs)
+        with BaseScraper() as s:
+            listings = s.scrape(prefs)
     """
 
     def __init__(self, headless: bool = True):
         self.headless = headless
-        self._playwright = None
+        self._pw = None
         self._browser: Optional[Browser] = None
 
-    async def __aenter__(self):
-        self._playwright = await async_playwright().start()
-        self._browser = await self._playwright.chromium.launch(
+    def __enter__(self):
+        self._pw = sync_playwright().start()
+        self._browser = self._pw.chromium.launch(
             headless=self.headless,
             args=[
                 "--no-sandbox",
@@ -110,16 +113,19 @@ class BaseScraper:
         )
         return self
 
-    async def __aexit__(self, *args):
-        if self._browser:
-            await self._browser.close()
-        if self._playwright:
-            await self._playwright.stop()
+    def __exit__(self, *args):
+        try:
+            if self._browser:
+                self._browser.close()
+            if self._pw:
+                self._pw.stop()
+        except Exception:
+            pass  # suppress any cleanup noise
 
-    async def new_context(self) -> BrowserContext:
+    def new_context(self) -> BrowserContext:
         """Return a fresh browser context with a random user-agent."""
         ua = random.choice(USER_AGENTS)
-        ctx = await self._browser.new_context(
+        ctx = self._browser.new_context(
             user_agent=ua,
             viewport={"width": 1280, "height": 800},
             locale="en-IN",
@@ -129,23 +135,22 @@ class BaseScraper:
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             },
         )
-        # Hide webdriver flag
-        await ctx.add_init_script(
+        ctx.add_init_script(
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
         )
         return ctx
 
-    async def new_page(self) -> tuple[BrowserContext, Page]:
-        ctx = await self.new_context()
-        page = await ctx.new_page()
+    def new_page(self) -> tuple[BrowserContext, Page]:
+        ctx = self.new_context()
+        page = ctx.new_page()
         return ctx, page
 
-    async def random_delay(self, min_s: float = 2.0, max_s: float = 5.0):
+    def random_delay(self, min_s: float = 2.0, max_s: float = 5.0):
         """Human-like delay between requests."""
-        await asyncio.sleep(random.uniform(min_s, max_s))
+        time.sleep(random.uniform(min_s, max_s))
 
-    async def scrape(self, prefs: dict) -> list[dict]:
-        """Override this in each scraper. Return list of listing dicts."""
+    def scrape(self, prefs: dict) -> list[dict]:
+        """Override in each scraper. Return list of listing dicts."""
         raise NotImplementedError
 
 
@@ -159,11 +164,7 @@ def save_listings(listings: list[dict]) -> int:
         return 0
     from db.client import db
     client = db()
-    rows = []
-    for l in listings:
-        row = {k: v for k, v in l.items() if k != "id"}  # let DB generate id
-        rows.append(row)
-    # on_conflict: do nothing for duplicate (platform, listing_id)
+    rows = [{k: v for k, v in l.items() if k != "id"} for l in listings]
     result = client.table("listings").upsert(
         rows, on_conflict="platform,listing_id", ignore_duplicates=True
     ).execute()
