@@ -1,0 +1,14 @@
+{
+  "name": "flat-hunter-whatsapp",
+  "version": "1.0.0",
+  "description": "WhatsApp agent for flat hunter",
+  "main": "whatsapp/index.js",
+  "scripts": {
+    "whatsapp": "node whatsapp/index.js"
+  },
+  "dependencies": {
+    "whatsapp-web.js": "^1.26.1",
+    "qrcode-terminal": "^0.12.0",
+    "express": "^4.21.2"
+  }
+}
