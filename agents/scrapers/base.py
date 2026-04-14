@@ -311,10 +311,15 @@ except ImportError:
 # ── Supabase persistence ──────────────────────────────────────────────────────
 def save_listings(listings: list[dict]) -> int:
     """
-    Upsert listings to Supabase.
+    Upsert listings to Supabase one row at a time.
+    - Single-row upserts are immune to 'ON CONFLICT DO UPDATE command cannot
+      affect row a second time' — that error only occurs with batch upserts
+      containing duplicate conflict keys.
     - On conflict (same platform + listing_id): updates the row INCLUDING
       last_scraped_at, so the freshness filter in scraper_orchestrator works.
-    - Returns count of rows written (inserts + updates).
+    - Errors on individual rows are caught and skipped — one bad row never
+      aborts the whole save.
+    - Returns count of rows successfully written.
     """
     if not listings:
         return 0
@@ -322,21 +327,24 @@ def save_listings(listings: list[dict]) -> int:
     from datetime import datetime, timezone
     client = db()
     ts = datetime.now(timezone.utc).isoformat()
-    rows = [
-        {**{k: v for k, v in l.items() if k != "id"}, "last_scraped_at": ts}
-        for l in listings
-    ]
-    # Deduplicate within batch — PostgreSQL won't update the same row twice
+
+    # Build rows, dedup in Python first as a cheap pre-filter
     seen: dict = {}
-    for row in rows:
+    for l in listings:
+        row = {**{k: v for k, v in l.items() if k != "id"}, "last_scraped_at": ts}
         key = (row.get("platform"), row.get("listing_id"))
         seen[key] = row
-    rows = list(seen.values())
-    if not rows:
-        return 0
-    result = (
-        client.table("listings")
-        .upsert(rows, on_conflict="platform,listing_id")   # updates existing rows too
-        .execute()
-    )
-    return len(result.data) if result.data else 0
+
+    saved = 0
+    for row in seen.values():
+        try:
+            result = (
+                client.table("listings")
+                .upsert([row], on_conflict="platform,listing_id")
+                .execute()
+            )
+            if result.data:
+                saved += len(result.data)
+        except Exception as e:
+            print(f"  [save] skipped ({row.get('platform')}, {row.get('listing_id')}): {e}")
+    return saved
