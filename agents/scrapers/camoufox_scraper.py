@@ -23,6 +23,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 import asyncio
+import concurrent.futures
 import re
 import time
 import random
@@ -150,7 +151,11 @@ def _scrape_url(url: str, platform: str) -> list[dict]:
     """
     Open one URL in a fresh Camoufox browser, extract listing cards, close browser.
     Returns raw listing dicts in standard format.
-    Uses async API internally to avoid Playwright sync/asyncio conflicts on CI.
+
+    Runs the async scrape inside a dedicated ThreadPoolExecutor thread so that
+    asyncio.run() always gets a clean event-loop state, regardless of whatever
+    asyncio machinery GitHub Actions (or any other host) has left running in the
+    main thread.  This is the only approach that is 100% safe on all platforms.
     """
     # Guard: skip live browser on Python 3.14 Windows (use cache instead)
     if sys.version_info >= (3, 14) and sys.platform == "win32":
@@ -163,8 +168,15 @@ def _scrape_url(url: str, platform: str) -> list[dict]:
         print("  [camoufox] Not installed. Run: pip install 'camoufox[geoip]' && python -m camoufox fetch")
         return []
 
-    try:
+    def _run():
         return asyncio.run(_scrape_url_async(url, platform))
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            return ex.submit(_run).result(timeout=120)
+    except concurrent.futures.TimeoutError:
+        print(f"  [camoufox] {platform}: timed out after 120s")
+        return []
     except Exception as e:
         print(f"  [camoufox] {platform} error: {e}")
         return []
