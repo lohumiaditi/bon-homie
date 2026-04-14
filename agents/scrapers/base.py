@@ -1,18 +1,24 @@
 """
 Base Scraper
 ------------
-Shared Playwright setup using the SYNC API (no asyncio).
-This avoids all Windows + Python 3.14 event loop incompatibilities.
+Two scraper bases are provided:
 
-All scrapers inherit BaseScraper and override scrape().
+  RequestsScraper  — uses requests + BeautifulSoup.
+                     No browser needed. Works on Python 3.14+ / Windows.
+                     ALL current scrapers inherit this.
+
+  BaseScraper      — uses Playwright sync API (kept for future use).
+                     Only used if Playwright is correctly installed.
+
+Helper functions (empty_listing, extract_price, etc.) are shared.
 """
 
 import random
 import re
 import time
 import uuid
+import requests
 from typing import Optional
-from playwright.sync_api import sync_playwright, Browser, BrowserContext, Page
 
 
 # ── Standard listing schema ───────────────────────────────────────────────────
@@ -23,15 +29,15 @@ def empty_listing() -> dict:
         "listing_id": "",
         "url": "",
         "title": "",
-        "price": None,           # int, monthly rent
+        "price": None,           # int, monthly rent in INR
         "area_name": "",
         "address": "",
         "city": "Pune",
-        "furnishing": None,      # 'furnished'|'semi-furnished'|'unfurnished'
-        "renter_type": None,     # 'family'|'bachelor'
-        "gender": None,          # 'male'|'female'
-        "occupancy": None,       # 'single'|'double'
-        "brokerage": None,       # True|False
+        "furnishing": None,      # 'furnished' | 'semi-furnished' | 'unfurnished'
+        "renter_type": None,     # 'family' | 'bachelor'
+        "gender": None,          # 'male' | 'female'
+        "occupancy": None,       # 'single' | 'double'
+        "brokerage": None,       # True | False
         "images": [],            # list of image URLs
         "contact_raw": "",
         "contact": "",
@@ -40,14 +46,55 @@ def empty_listing() -> dict:
     }
 
 
-# ── User agents ───────────────────────────────────────────────────────────────
+# ── User agents (rotated per request) ────────────────────────────────────────
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 Edg/122.0.0.0",
 ]
+
+# ── Card CSS selectors shared across scrapers ────────────────────────────────
+# Used by both camoufox_scraper.py (Strategy 1) and individual BeautifulSoup scrapers.
+CARD_SELECTORS = [
+    ".package-detail",                 # NoBroker
+    "[class*='PropertyCard']",
+    "[class*='propertyCard']",
+    "[class*='property-card']",
+    "[class*='property_card']",
+    "[class*='srpCard']",
+    "[class*='SrpCard']",
+    "[class*='srp-card']",
+    "[class*='mb-srp__card']",         # MagicBricks
+    "[class*='listing-card']",
+    "[class*='listingCard']",
+    "[class*='Listing_card']",
+    "[class*='prop-card']",
+    "[class*='propCard']",
+    "[class*='result-card']",
+    "[class*='resultCard']",
+    "li[class*='property']",
+    "article[class*='prop']",
+    "[data-listing-id]",
+    "[data-property-id]",
+    "[data-id][class*='prop']",
+]
+
+# Browser-like headers sent with every request
+_HEADERS_BASE = {
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-IN,en;q=0.9,hi;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Cache-Control": "max-age=0",
+    "DNT": "1",
+}
 
 
 # ── Phone number normalizer ───────────────────────────────────────────────────
@@ -78,7 +125,10 @@ def normalize_furnishing(text: str) -> Optional[str]:
 
 # ── Price extractor ───────────────────────────────────────────────────────────
 def extract_price(text: str) -> Optional[int]:
-    """Extract integer rent from short price strings like '12,500' or '12500'."""
+    """
+    Extract integer rent from short price strings like '12,500/month' or 'Rs.12500'.
+    Returns None if the value is outside a plausible rent range (1k – 5L).
+    """
     digits = re.sub(r"[^\d]", "", text)
     if digits:
         val = int(digits)
@@ -87,85 +137,198 @@ def extract_price(text: str) -> Optional[int]:
     return None
 
 
-# ── Base browser (SYNC) ───────────────────────────────────────────────────────
-class BaseScraper:
+# ── Requests-based page fetcher ───────────────────────────────────────────────
+def _do_get(session: requests.Session, url: str, headers: dict,
+            retries: int, base_delay: float) -> str:
+    """Internal helper: GET with retry/backoff. Returns HTML or ''."""
+    for attempt in range(retries):
+        try:
+            resp = session.get(url, headers=headers, timeout=30, allow_redirects=True)
+            if resp.status_code == 200:
+                return resp.text
+            if resp.status_code == 403:
+                wait = base_delay * (2 ** attempt)
+                print(f"    [fetch] 403 on attempt {attempt + 1}. Waiting {wait:.0f}s...")
+                time.sleep(wait)
+            elif resp.status_code == 429:
+                print(f"    [fetch] 429 rate-limited. Sleeping 30s...")
+                time.sleep(30)
+            else:
+                print(f"    [fetch] HTTP {resp.status_code} on attempt {attempt + 1}: {url[:60]}")
+                time.sleep(base_delay)
+        except requests.exceptions.Timeout:
+            print(f"    [fetch] Timeout on attempt {attempt + 1}: {url[:60]}")
+            time.sleep(base_delay * (attempt + 1))
+        except Exception as e:
+            print(f"    [fetch] Error on attempt {attempt + 1}: {e}")
+            time.sleep(base_delay)
+    print(f"    [fetch] All {retries} attempts failed for: {url[:70]}")
+    return ""
+
+
+def fetch_with_requests(
+    url: str,
+    retries: int = 3,
+    base_delay: float = 2.0,
+    extra_headers: Optional[dict] = None,
+) -> str:
     """
-    Sync Playwright scraper base class.
+    Fetch a page's HTML using requests (no browser required).
+    Rotates User-Agent, retries with backoff on 403/429/timeout.
+    """
+    headers = {**_HEADERS_BASE, "User-Agent": random.choice(USER_AGENTS)}
+    if extra_headers:
+        headers.update(extra_headers)
+    return _do_get(requests.Session(), url, headers, retries, base_delay)
+
+
+def fetch_with_session(
+    base_url: str,
+    search_url: str,
+    retries: int = 3,
+    base_delay: float = 2.0,
+    extra_headers: Optional[dict] = None,
+) -> str:
+    """
+    Two-step fetch that bypasses basic bot detection:
+      1. Visit the site homepage first to collect cookies + session tokens.
+      2. Fetch the actual search URL with those cookies + a Referer header.
+
+    Use this instead of fetch_with_requests() for sites that return 403
+    on direct requests (99Acres, MagicBricks, Housing, etc.).
+    """
+    ua = random.choice(USER_AGENTS)
+    headers = {**_HEADERS_BASE, "User-Agent": ua}
+    if extra_headers:
+        headers.update(extra_headers)
+
+    session = requests.Session()
+
+    # Step 1 — warm the session (homepage visit establishes cookies)
+    try:
+        session.get(base_url, headers=headers, timeout=15, allow_redirects=True)
+        time.sleep(random.uniform(0.8, 1.8))
+        headers["Referer"] = base_url
+    except Exception as e:
+        print(f"    [fetch] Session warm failed ({e}). Trying direct fetch...")
+
+    # Step 2 — fetch the actual search page with warmed session
+    return _do_get(session, search_url, headers, retries, base_delay)
+
+
+# ── Requests-based scraper base class ────────────────────────────────────────
+class RequestsScraper:
+    """
+    Base class for all scrapers.
+    Uses requests + BeautifulSoup — no browser, no Playwright.
+    Works on Python 3.14+ / Windows out of the box.
 
     Usage:
-        with BaseScraper() as s:
-            listings = s.scrape(prefs)
+        scraper = MyScraper()
+        listings = scraper.scrape(prefs, max_pages=2)
     """
 
     def __init__(self, headless: bool = True):
-        self.headless = headless
-        self._pw = None
-        self._browser: Optional[Browser] = None
+        # headless param accepted for API compatibility with orchestrator
+        pass
 
-    def __enter__(self):
-        self._pw = sync_playwright().start()
-        self._browser = self._pw.chromium.launch(
-            headless=self.headless,
-            args=[
-                "--no-sandbox",
-                "--disable-blink-features=AutomationControlled",
-            ],
-        )
-        return self
-
-    def __exit__(self, *args):
-        try:
-            if self._browser:
-                self._browser.close()
-            if self._pw:
-                self._pw.stop()
-        except Exception:
-            pass  # suppress any cleanup noise
-
-    def new_context(self) -> BrowserContext:
-        """Return a fresh browser context with a random user-agent."""
-        ua = random.choice(USER_AGENTS)
-        ctx = self._browser.new_context(
-            user_agent=ua,
-            viewport={"width": 1280, "height": 800},
-            locale="en-IN",
-            timezone_id="Asia/Kolkata",
-            extra_http_headers={
-                "Accept-Language": "en-IN,en;q=0.9",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            },
-        )
-        ctx.add_init_script(
-            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-        )
-        return ctx
-
-    def new_page(self) -> tuple[BrowserContext, Page]:
-        ctx = self.new_context()
-        page = ctx.new_page()
-        return ctx, page
-
-    def random_delay(self, min_s: float = 2.0, max_s: float = 5.0):
+    def random_delay(self, min_s: float = 1.5, max_s: float = 4.0):
         """Human-like delay between requests."""
         time.sleep(random.uniform(min_s, max_s))
 
-    def scrape(self, prefs: dict) -> list[dict]:
-        """Override in each scraper. Return list of listing dicts."""
+    def scrape(self, prefs: dict, max_pages: int = 3) -> list[dict]:
+        """Override in subclass. Return list of listing dicts."""
         raise NotImplementedError
+
+
+# ── Playwright-based scraper base (optional) ──────────────────────────────────
+try:
+    from playwright.sync_api import sync_playwright, Browser, BrowserContext, Page
+
+    class BaseScraper:
+        """
+        Sync Playwright scraper. Requires a working Playwright installation.
+        Use RequestsScraper (above) for everyday scraping on Python 3.14.
+        """
+
+        def __init__(self, headless: bool = True):
+            self.headless = headless
+            self._pw = None
+            self._browser: Optional[Browser] = None
+
+        def __enter__(self):
+            self._pw = sync_playwright().start()
+            self._browser = self._pw.chromium.launch(
+                headless=self.headless,
+                args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
+            )
+            return self
+
+        def __exit__(self, *args):
+            try:
+                if self._browser:
+                    self._browser.close()
+                if self._pw:
+                    self._pw.stop()
+            except Exception:
+                pass
+
+        def new_context(self) -> "BrowserContext":
+            ua = random.choice(USER_AGENTS)
+            ctx = self._browser.new_context(
+                user_agent=ua,
+                viewport={"width": 1280, "height": 800},
+                locale="en-IN",
+                timezone_id="Asia/Kolkata",
+                extra_http_headers={"Accept-Language": "en-IN,en;q=0.9"},
+            )
+            ctx.add_init_script(
+                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+            )
+            return ctx
+
+        def new_page(self) -> "tuple[BrowserContext, Page]":
+            ctx = self.new_context()
+            page = ctx.new_page()
+            return ctx, page
+
+        def random_delay(self, min_s: float = 2.0, max_s: float = 5.0):
+            time.sleep(random.uniform(min_s, max_s))
+
+        def scrape(self, prefs: dict) -> list[dict]:
+            raise NotImplementedError
+
+except ImportError:
+    # Playwright not installed — BaseScraper falls back to RequestsScraper
+    class BaseScraper(RequestsScraper):  # type: ignore
+        """Playwright unavailable — BaseScraper delegates to RequestsScraper."""
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
 
 
 # ── Supabase persistence ──────────────────────────────────────────────────────
 def save_listings(listings: list[dict]) -> int:
     """
-    Upsert listings to Supabase. Returns count of new rows inserted.
-    Duplicates (same platform + listing_id) are silently skipped.
+    Upsert listings to Supabase.
+    - On conflict (same platform + listing_id): updates the row INCLUDING
+      last_scraped_at, so the freshness filter in scraper_orchestrator works.
+    - Returns count of rows written (inserts + updates).
     """
     if not listings:
         return 0
     from db.client import db
+    from datetime import datetime, timezone
     client = db()
-    rows = [{k: v for k, v in l.items() if k != "id"} for l in listings]
-    result = client.table("listings").upsert(
-        rows, on_conflict="platform,listing_id", ignore_duplicates=True
-    ).execute()
+    ts = datetime.now(timezone.utc).isoformat()
+    rows = [
+        {**{k: v for k, v in l.items() if k != "id"}, "last_scraped_at": ts}
+        for l in listings
+    ]
+    result = (
+        client.table("listings")
+        .upsert(rows, on_conflict="platform,listing_id")   # updates existing rows too
+        .execute()
+    )
     return len(result.data) if result.data else 0

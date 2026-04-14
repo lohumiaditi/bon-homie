@@ -1,0 +1,36 @@
+name: Scrape Pune Listings
+
+on:
+  schedule:
+    - cron: '0 */4 * * *'   # every 4 hours UTC (6 runs/day, well within free tier)
+  workflow_dispatch:          # manual trigger via POST /trigger-scrape API
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90       # 20 areas × 5 sites × ~20s + delays ≈ 45–60 min
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Download Camoufox browser binary
+        run: python -m camoufox fetch
+
+      - name: Run batch scrape (all 20 areas × 5 sites → Supabase)
+        run: python agents/scrapers/camoufox_scraper.py
+
+    env:
+      SUPABASE_URL:    ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY:    ${{ secrets.SUPABASE_KEY }}
+      GOOGLE_MAPS_KEY: ${{ secrets.GOOGLE_MAPS_KEY }}
+      APIFY_KEY:       ${{ secrets.APIFY_KEY }}

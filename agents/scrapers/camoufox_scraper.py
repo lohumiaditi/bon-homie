@@ -1,0 +1,384 @@
+"""
+Camoufox Browser Scraper
+------------------------
+Replaces apify_browser.py. Uses Camoufox (modified Firefox with stealth patches)
+to bypass Cloudflare/Akamai bot protection on all 5 real estate sites.
+
+Why Camoufox works where requests fails:
+  - Real Firefox browser (not a fake UA string)
+  - Solves Cloudflare JS challenges automatically
+  - Mimics human fingerprints (canvas, fonts, screen size, WebGL)
+  - Runs on Python 3.11+ Linux (GitHub Actions) and Python 3.14+ Windows
+
+Two entry points:
+  scrape_all_with_camoufox(prefs)  — called by orchestrator for one area on demand
+  run_batch_scrape()               — called by GitHub Actions for all 20 areas
+
+Run standalone (GitHub Actions):
+    python agents/scrapers/camoufox_scraper.py
+"""
+
+import sys
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+
+import re
+import time
+import random
+import uuid
+
+from bs4 import BeautifulSoup
+from agents.scrapers.base import (
+    empty_listing, extract_price, normalize_furnishing, save_listings,
+    CARD_SELECTORS,
+)
+
+# ── Top 20 Pune areas for GitHub Actions batch run ───────────────────────────
+TOP_20_AREAS = [
+    "Baner", "Kothrud", "Viman Nagar", "Koregaon Park", "Wakad",
+    "Hinjewadi", "Aundh", "Kalyani Nagar", "Hadapsar", "Magarpatta",
+    "Bavdhan", "Pimple Saudagar", "Shivajinagar", "Deccan", "Kharadi",
+    "Wagholi", "Undri", "Kondhwa", "Pimple Nilakh", "Pashan",
+]
+
+# GitHub Actions batch budget range (broad — covers all listings)
+BATCH_BUDGET_MIN = 5_000
+BATCH_BUDGET_MAX = 1_20_000
+
+# Browser timing constants (ms)
+PAGE_TIMEOUT_MS   = 50_000   # max time to wait for page navigation
+POST_LOAD_WAIT_MS = 4_000    # wait after DOMContentLoaded for JS to render
+SCROLL_PAUSE_MS   = 900      # pause between each scroll step
+
+# Per-site selectors to wait for before extracting HTML
+# (ensures the page has actually loaded listings, not just the shell)
+_WAIT_SELECTORS = {
+    "nobroker":    ".package-detail, [class*='PropertyCard'], [class*='srp-property']",
+    "99acres":     "[class*='srpCard'], [class*='propertyCard'], [class*='listingCard']",
+    "magicbricks": "[class*='mb-srp__card'], [class*='PropertyCard']",
+    "housing":     "[class*='srpCard'], article[class*='prop'], [class*='listing']",
+    "squareyards": "[class*='PropertyCard'], [class*='property-card'], [class*='propCard']",
+}
+
+# Longer wait for NoBroker (heavy React app, slow hydration)
+_EXTRA_WAIT_MS = {
+    "nobroker": 6_000,
+    "99acres":  4_000,
+}
+
+_PRICE_RE = re.compile(
+    r"(?:Rs\.?|INR|[\u20b9])?\s*(\d[\d,]+)\s*(?:/\s*(?:mo|month|pm))?", re.I
+)
+
+
+# ── URL builders ──────────────────────────────────────────────────────────────
+def _slug(area: str) -> str:
+    return area.lower().replace(" ", "-")
+
+
+def _build_urls(area: str, lo: int, hi: int) -> list[dict]:
+    """Return list of {url, platform} dicts for one area across all 5 sites."""
+    s = _slug(area)
+    return [
+        {
+            "platform": "nobroker",
+            "url": f"https://www.nobroker.in/property/residential/rent/pune/{s}?budget={lo},{hi}",
+        },
+        {
+            "platform": "99acres",
+            "url": (
+                f"https://www.99acres.com/property-for-rent-in-{s}-9"
+                f"?search_type=rent&city=9&min_budget={lo}&max_budget={hi}"
+            ),
+        },
+        {
+            "platform": "housing",
+            "url": f"https://housing.com/in/rent/flats-in-{s}-pune",
+        },
+        {
+            "platform": "magicbricks",
+            "url": (
+                f"https://www.magicbricks.com/property-for-rent/residential-real-estate"
+                f"?BudgetMin={lo}&BudgetMax={hi}&City=Pune&Locality={area.title()}"
+                f"&proptype=Multistorey-Apartment,Builder-Floor-Apartment,"
+                f"Penthouse,Studio-Apartment"
+            ),
+        },
+        {
+            "platform": "squareyards",
+            "url": (
+                f"https://www.squareyards.com/pune/{s}-property-for-rent"
+                f"?minBudget={lo}&maxBudget={hi}"
+            ),
+        },
+    ]
+
+
+# ── Core scraper: one URL → list of listing dicts ────────────────────────────
+def _scrape_url(url: str, platform: str) -> list[dict]:
+    """
+    Open one URL in a fresh Camoufox browser, extract listing cards, close browser.
+    Returns raw listing dicts in standard format.
+    Each call spawns its own browser process (clean fingerprint per site).
+    """
+    # Guard: skip live browser on Python 3.14 Windows (use cache instead)
+    if sys.version_info >= (3, 14) and sys.platform == "win32":
+        print(f"  [camoufox] Skipping live scrape on Python 3.14/Windows ({platform}). Use cache.")
+        return []
+
+    try:
+        from camoufox.sync_api import Camoufox
+    except ImportError:
+        print("  [camoufox] Not installed. Run: pip install camoufox && python -m camoufox fetch")
+        return []
+
+    try:
+        with Camoufox(headless=True, geoip=True) as browser:
+            page = browser.new_page()
+
+            print(f"  [camoufox] {platform}: {url[:70]}...")
+            page.goto(url, timeout=PAGE_TIMEOUT_MS, wait_until="domcontentloaded")
+
+            # Wait for JS-rendered listings to appear
+            extra_wait = _EXTRA_WAIT_MS.get(platform, POST_LOAD_WAIT_MS)
+            page.wait_for_timeout(extra_wait)
+
+            # Try to wait for a specific card selector (more reliable than timed wait)
+            if platform in _WAIT_SELECTORS:
+                try:
+                    page.wait_for_selector(_WAIT_SELECTORS[platform], timeout=15_000)
+                except Exception:
+                    pass  # fall through — we'll still try to parse whatever loaded
+
+            # Scroll 3× to trigger lazy-loaded images and infinite scroll
+            for _ in range(3):
+                page.evaluate("window.scrollBy(0, window.innerHeight)")
+                page.wait_for_timeout(SCROLL_PAUSE_MS)
+            page.wait_for_timeout(800)
+
+            html = page.content()
+
+        listings = _parse_html(html, platform, url)
+        print(f"  [camoufox] {platform}: {len(listings)} listings extracted")
+        return listings
+
+    except Exception as e:
+        print(f"  [camoufox] {platform} error: {e}")
+        return []
+
+
+# ── HTML parser: delegates to existing per-site parse_listing_card functions ──
+def _parse_html(html: str, platform: str, source_url: str) -> list[dict]:
+    """
+    Parse full-page HTML into listing dicts.
+    Strategy 1: Try 20 known CSS selector patterns from base.CARD_SELECTORS
+    Strategy 2: Price-element DOM walk (finds cards by ₹ symbol proximity)
+    Then delegates to per-site parse_listing_card() for structured extraction.
+    """
+    if not html:
+        return []
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    # ── Strategy 1: CSS selector patterns ────────────────────────────────────
+    cards = []
+    for sel in CARD_SELECTORS:
+        found = soup.select(sel)
+        if len(found) > 1:
+            cards = found
+            break
+
+    # ── Strategy 2: price-element detection fallback ─────────────────────────
+    if not cards:
+        price_nodes = [
+            el for el in soup.find_all(True)
+            if not el.find_all(True, recursive=False)   # leaf nodes only
+            and re.search(r"[₹Rs\.\s]{0,4}\s*\d[\d,]{2,}", el.get_text())
+            and len(el.get_text(strip=True)) < 60
+        ]
+        seen = set()
+        for pn in price_nodes[:40]:
+            node = pn.parent
+            for _ in range(10):
+                if node is None or node.name == "body":
+                    break
+                if node.find("img") and node.find("a", href=True):
+                    nid = id(node)
+                    if nid not in seen:
+                        seen.add(nid)
+                        cards.append(node)
+                    break
+                node = node.parent
+
+    if not cards:
+        return []
+
+    # ── Delegate to per-site parsers ──────────────────────────────────────────
+    parsers = _get_parsers()
+    parse_fn = parsers.get(platform)
+
+    listings = []
+    for card in cards[:30]:
+        if parse_fn:
+            l = parse_fn(card)
+            l["city"] = "Pune"
+            # Ensure listing_id is populated if parser missed it
+            if not l.get("listing_id"):
+                link = card.find("a", href=True)
+                if link:
+                    href = link["href"]
+                    if href.startswith("/"):
+                        base = "/".join(source_url.split("/")[:3])
+                        href = base + href
+                    l["url"] = l["url"] or href
+                    l["listing_id"] = href.rstrip("/").split("/")[-1]
+        else:
+            l = _generic_extract(card, platform, source_url)
+
+        if l and (l.get("listing_id") or l.get("url")):
+            listings.append(l)
+
+    return listings
+
+
+def _get_parsers() -> dict:
+    """Lazy-import per-site parse_listing_card functions from existing scrapers."""
+    try:
+        from agents.scrapers.nobroker        import parse_listing_card as nb
+        from agents.scrapers.ninetynineacres import parse_listing_card as nna
+        from agents.scrapers.housing         import parse_listing_card as hsg
+        from agents.scrapers.magicbricks     import parse_listing_card as mb
+        from agents.scrapers.squareyards     import parse_listing_card as sy
+        return {
+            "nobroker":    nb,
+            "99acres":     nna,
+            "housing":     hsg,
+            "magicbricks": mb,
+            "squareyards": sy,
+        }
+    except Exception as e:
+        print(f"  [camoufox] Could not import site parsers: {e}")
+        return {}
+
+
+def _generic_extract(card, platform: str, source_url: str) -> dict:
+    """Generic fallback extraction for when a per-site parser isn't available."""
+    l = empty_listing()
+    l["platform"] = platform
+
+    link = card.find("a", href=True)
+    if link:
+        href = link["href"]
+        if href.startswith("/"):
+            base = "/".join(source_url.split("/")[:3])
+            href = base + href
+        l["url"] = href
+        l["listing_id"] = href.rstrip("/").split("/")[-1]
+
+    for sel in ["[class*='price']", "[class*='Price']", "[class*='rent']"]:
+        el = card.select_one(sel)
+        if el:
+            l["price"] = extract_price(el.get_text())
+            break
+
+    for sel in ["h2", "h3", "[class*='title']", "[class*='bhk']"]:
+        el = card.select_one(sel)
+        if el:
+            l["title"] = el.get_text(strip=True)
+            break
+
+    for sel in ["[class*='locality']", "[class*='location']", "[class*='address']"]:
+        el = card.select_one(sel)
+        if el:
+            txt = el.get_text(strip=True)
+            l["area_name"] = txt.split(",")[0]
+            l["address"] = txt
+            break
+
+    l["furnishing"] = normalize_furnishing(card.get_text())
+
+    imgs = []
+    for img in card.find_all("img"):
+        src = img.get("data-src") or img.get("data-lazy") or img.get("src") or ""
+        if src.startswith("http") and not re.search(
+            r"logo|placeholder|default|icon|banner|sprite|noimg|blank", src, re.I
+        ):
+            imgs.append(src)
+    l["images"] = list(dict.fromkeys(imgs))
+    return l
+
+
+# ── Public API: on-demand scrape for orchestrator ─────────────────────────────
+def scrape_all_with_camoufox(prefs: dict, max_pages: int = 1) -> list[dict]:
+    """
+    Signature matches scrape_all_with_apify(prefs, max_pages).
+    Scrapes all 5 sites for the first area in prefs using Camoufox.
+
+    NOTE: On Python 3.14 / Windows, this returns [] immediately — the
+    orchestrator's cache-first logic means this is only called when the
+    Supabase cache is empty, and GitHub Actions will replenish it.
+    """
+    areas = prefs.get("areas", ["Kothrud"])
+    area  = areas[0] if areas else "Kothrud"
+    lo    = prefs.get("budget_min", 5_000)
+    hi    = prefs.get("budget_max", 1_20_000)
+
+    print(f"\n  [camoufox] Live scrape: {area} (Rs.{lo}-{hi}) across 5 sites...")
+    url_list = _build_urls(area, lo, hi)
+
+    all_listings: list[dict] = []
+    for item in url_list:
+        listings = _scrape_url(item["url"], item["platform"])
+        for l in listings:
+            l["city"] = "Pune"
+        all_listings.extend(listings)
+        # Polite delay between sites (avoids triggering rate limits)
+        time.sleep(random.uniform(2.5, 4.5))
+
+    print(f"  [camoufox] On-demand total: {len(all_listings)} listings")
+    return all_listings
+
+
+# ── Batch entry point for GitHub Actions ─────────────────────────────────────
+def run_batch_scrape():
+    """
+    Scrapes TOP_20_AREAS × 5 sites and saves everything to Supabase.
+    Called from GitHub Actions: python agents/scrapers/camoufox_scraper.py
+    """
+    from dotenv import load_dotenv
+    load_dotenv()
+
+    print(f"[batch] Camoufox batch scrape: {len(TOP_20_AREAS)} areas × 5 sites")
+    print(f"[batch] Budget range: Rs.{BATCH_BUDGET_MIN} - Rs.{BATCH_BUDGET_MAX}")
+
+    total_saved = 0
+    for i, area in enumerate(TOP_20_AREAS, 1):
+        print(f"\n[batch] ── Area {i}/{len(TOP_20_AREAS)}: {area} ──")
+        url_list = _build_urls(area, BATCH_BUDGET_MIN, BATCH_BUDGET_MAX)
+        area_listings = []
+
+        for item in url_list:
+            listings = _scrape_url(item["url"], item["platform"])
+            for l in listings:
+                l["city"] = "Pune"
+            area_listings.extend(listings)
+            time.sleep(random.uniform(3.0, 6.0))  # polite delay between sites
+
+        if area_listings:
+            saved = save_listings(area_listings)
+            total_saved += saved
+            print(f"  [batch] {area}: {len(area_listings)} scraped, {saved} new → Supabase")
+        else:
+            print(f"  [batch] {area}: 0 listings (site may have blocked this area)")
+
+        # Longer delay between areas
+        if i < len(TOP_20_AREAS):
+            delay = random.uniform(8.0, 15.0)
+            print(f"  [batch] Waiting {delay:.1f}s before next area...")
+            time.sleep(delay)
+
+    print(f"\n[batch] COMPLETE. Total new listings saved: {total_saved}")
+
+
+if __name__ == "__main__":
+    run_batch_scrape()

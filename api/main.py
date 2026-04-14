@@ -241,6 +241,48 @@ def get_results(session_id: str):
     return {"session_id": session_id, "count": len(results), "listings": results}
 
 
+@app.post("/trigger-scrape")
+def trigger_scrape():
+    """
+    Dispatches the GitHub Actions 'Scrape Pune Listings' workflow on demand.
+    Requires GITHUB_TOKEN and GITHUB_REPO in .env.
+    Returns {"dispatched": true} on success or raises 503 on failure.
+    """
+    import requests as _req
+
+    token = os.environ.get("GITHUB_TOKEN", "")
+    repo  = os.environ.get("GITHUB_REPO", "")   # e.g. "tj17a/bon-homie"
+
+    if not token or not repo:
+        raise HTTPException(
+            status_code=503,
+            detail="GITHUB_TOKEN or GITHUB_REPO not configured in .env",
+        )
+
+    url = f"https://api.github.com/repos/{repo}/actions/workflows/scrape.yml/dispatches"
+    resp = _req.post(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        json={"ref": "main"},
+        timeout=15,
+    )
+
+    if resp.status_code == 204:
+        return {
+            "dispatched": True,
+            "message": "Scrape job triggered. New listings will appear in ~45 minutes.",
+        }
+
+    raise HTTPException(
+        status_code=503,
+        detail=f"GitHub API returned {resp.status_code}: {resp.text[:200]}",
+    )
+
+
 @app.get("/enquire/{listing_id}")
 def enquire(listing_id: str):
     """Returns a pre-filled WhatsApp wa.me link for the listing."""
