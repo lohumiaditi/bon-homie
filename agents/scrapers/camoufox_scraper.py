@@ -392,6 +392,19 @@ def run_batch_scrape():
             print(f"  [batch] Waiting {delay:.1f}s before next area...")
             time.sleep(delay)
 
+    # Facebook Marketplace + Groups (runs once, not per area)
+    print(f"\n[batch] ── Facebook Marketplace + Groups ──")
+    try:
+        from agents.scrapers.facebook_agent import scrape_facebook
+        fb_prefs = {"budget_min": BATCH_BUDGET_MIN, "budget_max": BATCH_BUDGET_MAX}
+        fb_listings = scrape_facebook(fb_prefs)
+        if fb_listings:
+            saved = save_listings(fb_listings)
+            total_saved += saved
+            print(f"  [batch] Facebook: {len(fb_listings)} scraped, {saved} new → Supabase")
+    except Exception as e:
+        print(f"  [batch] Facebook error: {e}")
+
     print(f"\n[batch] COMPLETE. Total new listings saved: {total_saved}")
 
 

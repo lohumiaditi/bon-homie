@@ -34,3 +34,5 @@ jobs:
       SUPABASE_KEY:    ${{ secrets.SUPABASE_KEY }}
       GOOGLE_MAPS_KEY: ${{ secrets.GOOGLE_MAPS_KEY }}
       APIFY_KEY:       ${{ secrets.APIFY_KEY }}
+      FB_EMAIL:        ${{ secrets.FB_EMAIL }}
+      FB_PASSWORD:     ${{ secrets.FB_PASSWORD }}
