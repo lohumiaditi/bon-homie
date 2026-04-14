@@ -22,6 +22,7 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
+import asyncio
 import re
 import time
 import random
@@ -115,11 +116,41 @@ def _build_urls(area: str, lo: int, hi: int) -> list[dict]:
 
 
 # ── Core scraper: one URL → list of listing dicts ────────────────────────────
+async def _scrape_url_async(url: str, platform: str) -> list[dict]:
+    """Async Camoufox scrape of a single URL. Uses async API to avoid event-loop conflicts."""
+    from camoufox.async_api import AsyncCamoufox
+
+    print(f"  [camoufox] {platform}: {url[:70]}...")
+    async with AsyncCamoufox(headless=True, geoip=True) as browser:
+        page = await browser.new_page()
+        await page.goto(url, timeout=PAGE_TIMEOUT_MS, wait_until="domcontentloaded")
+
+        extra_wait = _EXTRA_WAIT_MS.get(platform, POST_LOAD_WAIT_MS)
+        await page.wait_for_timeout(extra_wait)
+
+        if platform in _WAIT_SELECTORS:
+            try:
+                await page.wait_for_selector(_WAIT_SELECTORS[platform], timeout=15_000)
+            except Exception:
+                pass
+
+        for _ in range(3):
+            await page.evaluate("window.scrollBy(0, window.innerHeight)")
+            await page.wait_for_timeout(SCROLL_PAUSE_MS)
+        await page.wait_for_timeout(800)
+
+        html = await page.content()
+
+    listings = _parse_html(html, platform, url)
+    print(f"  [camoufox] {platform}: {len(listings)} listings extracted")
+    return listings
+
+
 def _scrape_url(url: str, platform: str) -> list[dict]:
     """
     Open one URL in a fresh Camoufox browser, extract listing cards, close browser.
     Returns raw listing dicts in standard format.
-    Each call spawns its own browser process (clean fingerprint per site).
+    Uses async API internally to avoid Playwright sync/asyncio conflicts on CI.
     """
     # Guard: skip live browser on Python 3.14 Windows (use cache instead)
     if sys.version_info >= (3, 14) and sys.platform == "win32":
@@ -127,41 +158,13 @@ def _scrape_url(url: str, platform: str) -> list[dict]:
         return []
 
     try:
-        from camoufox.sync_api import Camoufox
+        from camoufox.async_api import AsyncCamoufox  # noqa: F401
     except ImportError:
-        print("  [camoufox] Not installed. Run: pip install camoufox && python -m camoufox fetch")
+        print("  [camoufox] Not installed. Run: pip install 'camoufox[geoip]' && python -m camoufox fetch")
         return []
 
     try:
-        with Camoufox(headless=True, geoip=True) as browser:
-            page = browser.new_page()
-
-            print(f"  [camoufox] {platform}: {url[:70]}...")
-            page.goto(url, timeout=PAGE_TIMEOUT_MS, wait_until="domcontentloaded")
-
-            # Wait for JS-rendered listings to appear
-            extra_wait = _EXTRA_WAIT_MS.get(platform, POST_LOAD_WAIT_MS)
-            page.wait_for_timeout(extra_wait)
-
-            # Try to wait for a specific card selector (more reliable than timed wait)
-            if platform in _WAIT_SELECTORS:
-                try:
-                    page.wait_for_selector(_WAIT_SELECTORS[platform], timeout=15_000)
-                except Exception:
-                    pass  # fall through — we'll still try to parse whatever loaded
-
-            # Scroll 3× to trigger lazy-loaded images and infinite scroll
-            for _ in range(3):
-                page.evaluate("window.scrollBy(0, window.innerHeight)")
-                page.wait_for_timeout(SCROLL_PAUSE_MS)
-            page.wait_for_timeout(800)
-
-            html = page.content()
-
-        listings = _parse_html(html, platform, url)
-        print(f"  [camoufox] {platform}: {len(listings)} listings extracted")
-        return listings
-
+        return asyncio.run(_scrape_url_async(url, platform))
     except Exception as e:
         print(f"  [camoufox] {platform} error: {e}")
         return []
