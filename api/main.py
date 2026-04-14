@@ -20,8 +20,9 @@ import sys
 import uuid
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, Response, Cookie, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from typing import Optional
 from urllib.parse import quote
@@ -155,6 +156,146 @@ def _nearest_destination_station(destination_address: str | None) -> str | None:
     except Exception:
         pass
     return None
+
+
+# ── Auth dependency ───────────────────────────────────────────────────────────
+
+def get_current_user(fh_token: Optional[str] = Cookie(default=None)) -> dict:
+    """
+    FastAPI dependency. Reads the HTTP-only JWT cookie and returns the user dict.
+    Raises 401 if missing or invalid. Use as: user = Depends(get_current_user)
+    """
+    if not fh_token:
+        raise HTTPException(status_code=401, detail="Not authenticated. Please log in.")
+    try:
+        from agents.auth_agent import verify_token
+        payload = verify_token(fh_token, expected_type="access")
+        return {"user_id": payload["sub"], "fb_id": payload["fb_id"]}
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"Session expired or invalid: {e}")
+
+
+# ── Facebook OAuth endpoints ──────────────────────────────────────────────────
+
+@app.get("/auth/facebook")
+def facebook_login(response: Response):
+    """
+    Step 1: Redirect user to Facebook OAuth consent screen.
+    Sets a short-lived CSRF state cookie before redirecting.
+    """
+    from agents.auth_agent import generate_oauth_state, get_facebook_oauth_url, COOKIE_STATE
+    state    = generate_oauth_state()
+    oauth_url = get_facebook_oauth_url(state)
+
+    redirect = RedirectResponse(url=oauth_url)
+    # HTTP-only state cookie (expires in 10 min — just for the OAuth round-trip)
+    redirect.set_cookie(
+        key=COOKIE_STATE, value=state,
+        httponly=True, secure=False, samesite="lax", max_age=600,
+    )
+    return redirect
+
+
+@app.get("/auth/facebook/callback")
+def facebook_callback(
+    request: Request,
+    response: Response,
+    code: Optional[str] = None,
+    state: Optional[str] = None,
+    error: Optional[str] = None,
+):
+    """
+    Step 2: Facebook redirects here after user authorises the app.
+    Verifies CSRF state, exchanges code for tokens, sets JWT cookies.
+    """
+    frontend_url = os.environ.get("FRONTEND_URL", "http://localhost:5173")
+
+    if error:
+        return RedirectResponse(url=f"{frontend_url}?auth_error={error}")
+
+    if not code or not state:
+        raise HTTPException(status_code=400, detail="Missing code or state parameter.")
+
+    from agents.auth_agent import (
+        complete_facebook_login, COOKIE_ACCESS, COOKIE_REFRESH, COOKIE_STATE
+    )
+    stored_state = request.cookies.get(COOKIE_STATE, "")
+
+    try:
+        user, access_token, refresh_token = complete_facebook_login(code, state, stored_state)
+    except ValueError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Facebook auth failed: {e}")
+
+    is_prod = os.environ.get("ENV", "dev") == "prod"
+
+    redirect = RedirectResponse(url=f"{frontend_url}?auth=success")
+    # Access token — 24h, HTTP-only (XSS-safe)
+    redirect.set_cookie(
+        key=COOKIE_ACCESS, value=access_token,
+        httponly=True, secure=is_prod, samesite="lax", max_age=86_400,
+    )
+    # Refresh token — 30d, HTTP-only
+    redirect.set_cookie(
+        key=COOKIE_REFRESH, value=refresh_token,
+        httponly=True, secure=is_prod, samesite="lax", max_age=86_400 * 30,
+    )
+    # Clear the CSRF state cookie
+    redirect.delete_cookie(COOKIE_STATE)
+    return redirect
+
+
+@app.post("/auth/refresh")
+def refresh_session(
+    response: Response,
+    fh_refresh: Optional[str] = Cookie(default=None),
+):
+    """Issue a new access token using the refresh token (silent re-login)."""
+    if not fh_refresh:
+        raise HTTPException(status_code=401, detail="No refresh token.")
+    try:
+        from agents.auth_agent import verify_token, create_access_token, COOKIE_ACCESS
+        payload      = verify_token(fh_refresh, expected_type="refresh")
+        access_token = create_access_token(payload["sub"], payload["fb_id"])
+        response.set_cookie(
+            key=COOKIE_ACCESS, value=access_token,
+            httponly=True, secure=False, samesite="lax", max_age=86_400,
+        )
+        return {"ok": True, "message": "Session refreshed."}
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=str(e))
+
+
+@app.post("/auth/logout")
+def logout(response: Response):
+    """Clear all auth cookies."""
+    from agents.auth_agent import COOKIE_ACCESS, COOKIE_REFRESH
+    response.delete_cookie(COOKIE_ACCESS)
+    response.delete_cookie(COOKIE_REFRESH)
+    return {"ok": True, "message": "Logged out."}
+
+
+@app.get("/auth/me")
+def get_me(user: dict = Depends(get_current_user)):
+    """Return the currently logged-in user's public profile."""
+    try:
+        from db.client import db
+        from agents.auth_agent import decrypt
+        client = db()
+        result = client.table("users").select("*").eq("id", user["user_id"]).execute()
+        if not result.data:
+            return {"user_id": user["user_id"], "fb_id": user["fb_id"]}
+        row = result.data[0]
+        return {
+            "user_id":     row["id"],
+            "fb_id":       row["fb_id"],
+            "name":        decrypt(row.get("name_enc", "")),
+            "email":       decrypt(row.get("email_enc", "")),
+            "picture_url": row.get("picture_url", ""),
+        }
+    except Exception as e:
+        return {"user_id": user["user_id"], "fb_id": user["fb_id"], "error": str(e)}
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────

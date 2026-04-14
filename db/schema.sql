@@ -3,6 +3,27 @@
 -- Run this entire file once in Supabase SQL Editor
 -- ============================================================
 
+-- 0. Users (authenticated via Facebook OAuth)
+--    PII (name, email) stored Fernet-encrypted — only decryptable server-side.
+CREATE TABLE IF NOT EXISTS users (
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    fb_id        TEXT NOT NULL UNIQUE,         -- Facebook user ID (not PII)
+    name_enc     TEXT,                          -- Fernet-encrypted display name
+    email_enc    TEXT,                          -- Fernet-encrypted email
+    picture_url  TEXT,                          -- FB profile photo URL (public)
+    last_login   TIMESTAMPTZ DEFAULT now(),
+    created_at   TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_users_fb_id ON users(fb_id);
+
+-- ── Row Level Security ─────────────────────────────────────────────────────
+-- Users table: only the backend service role can read/write (all via API layer)
+ALTER TABLE users ENABLE ROW LEVEL SECURITY;
+-- No anon/public access — all reads go through FastAPI which enforces JWT auth.
+-- Backend uses service role key (SUPABASE_SERVICE_KEY) to bypass RLS.
+
+
 -- 1. User Preferences
 --    One row per search session
 CREATE TABLE IF NOT EXISTS user_preferences (
