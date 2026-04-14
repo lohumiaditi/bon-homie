@@ -20,6 +20,13 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
+      - name: Debug — confirm commit and base.py version
+        run: |
+          echo "=== Commit ==="
+          git log -1 --oneline
+          echo "=== base.py save_listings (lines 310-355) ==="
+          sed -n '310,355p' agents/scrapers/base.py
+
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
@@ -27,7 +34,7 @@ jobs:
         run: python -m camoufox fetch
 
       - name: Run batch scrape (all 20 areas × 5 sites → Supabase)
-        run: python agents/scrapers/camoufox_scraper.py
+        run: python -B agents/scrapers/camoufox_scraper.py
 
     env:
       SUPABASE_URL:    ${{ secrets.SUPABASE_URL }}
