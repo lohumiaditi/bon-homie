@@ -246,6 +246,69 @@ def facebook_callback(
     return redirect
 
 
+@app.post("/auth/facebook/token")
+def facebook_token_login(request_body: dict, response: Response):
+    """
+    JS SDK flow: frontend sends the FB access_token it received from the popup.
+    Backend verifies it with Facebook, creates the user, sets JWT cookies.
+    No redirect URI needed — works on any localhost port.
+    """
+    import httpx
+    from agents.auth_agent import (
+        get_or_create_user, create_access_token, create_refresh_token,
+        COOKIE_ACCESS, COOKIE_REFRESH
+    )
+
+    access_token = request_body.get("access_token", "")
+    if not access_token:
+        raise HTTPException(status_code=400, detail="access_token is required.")
+
+    app_id     = os.environ.get("FACEBOOK_APP_ID", "")
+    app_secret = os.environ.get("FACEBOOK_APP_SECRET", "")
+
+    # 1. Verify the token is genuine (not forged by the client)
+    if app_id and app_secret:
+        debug = httpx.get(
+            "https://graph.facebook.com/debug_token",
+            params={"input_token": access_token, "access_token": f"{app_id}|{app_secret}"},
+            timeout=10,
+        )
+        data = debug.json().get("data", {})
+        if not data.get("is_valid"):
+            raise HTTPException(status_code=403, detail="Facebook token is invalid or expired.")
+        if data.get("app_id") != app_id:
+            raise HTTPException(status_code=403, detail="Token belongs to a different app.")
+
+    # 2. Fetch user profile
+    info = httpx.get(
+        "https://graph.facebook.com/me",
+        params={"fields": "id,name,email,picture.type(large)", "access_token": access_token},
+        timeout=10,
+    )
+    info.raise_for_status()
+    fb_data = info.json()
+
+    fb_user = {
+        "fb_id":       fb_data.get("id"),
+        "name":        fb_data.get("name", ""),
+        "email":       fb_data.get("email", ""),
+        "picture_url": fb_data.get("picture", {}).get("data", {}).get("url", ""),
+    }
+
+    # 3. Upsert user in DB, issue JWT cookies
+    db_user      = get_or_create_user(fb_user)
+    access_jwt   = create_access_token(db_user["user_id"], db_user["fb_id"])
+    refresh_jwt  = create_refresh_token(db_user["user_id"], db_user["fb_id"])
+
+    is_prod = os.environ.get("ENV", "dev") == "prod"
+    response.set_cookie(COOKIE_ACCESS,  access_jwt,
+        httponly=True, secure=is_prod, samesite="lax", max_age=86_400)
+    response.set_cookie(COOKIE_REFRESH, refresh_jwt,
+        httponly=True, secure=is_prod, samesite="lax", max_age=86_400 * 30)
+
+    return {"ok": True, "name": db_user["name"], "picture_url": db_user["picture_url"]}
+
+
 @app.post("/auth/refresh")
 def refresh_session(
     response: Response,
