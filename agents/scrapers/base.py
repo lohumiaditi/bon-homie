@@ -326,6 +326,14 @@ def save_listings(listings: list[dict]) -> int:
         {**{k: v for k, v in l.items() if k != "id"}, "last_scraped_at": ts}
         for l in listings
     ]
+    # Deduplicate within batch — PostgreSQL won't update the same row twice
+    seen: dict = {}
+    for row in rows:
+        key = (row.get("platform"), row.get("listing_id"))
+        seen[key] = row
+    rows = list(seen.values())
+    if not rows:
+        return 0
     result = (
         client.table("listings")
         .upsert(rows, on_conflict="platform,listing_id")   # updates existing rows too
