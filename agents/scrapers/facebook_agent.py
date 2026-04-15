@@ -31,11 +31,23 @@ from agents.scrapers.base import empty_listing, normalize_phone, normalize_furni
 # ── Config ────────────────────────────────────────────────────────────────────
 
 # Popular Pune rental Facebook groups (public — no join required to view)
+# Used by Camoufox scraper (full-browser login via FB_EMAIL/FB_PASSWORD)
 PUNE_RENTAL_GROUPS = [
     "https://www.facebook.com/groups/puneflatrentals",
     "https://www.facebook.com/groups/puneflatsforrent",
     "https://www.facebook.com/groups/rentalpuneflatrooms",
     "https://www.facebook.com/groups/PuneAccommodation",
+]
+
+# Group IDs / slugs used by the Graph API scraper (user long-lived token flow).
+# For public groups, Graph API works without App Review.
+# Numeric IDs are more reliable than names (names can change).
+PUNE_GROUP_SLUGS = [
+    "puneflatrentals",
+    "puneflatsforrent",
+    "PuneAccommodation",
+    "punehomesforrent",
+    "PuneFlatRent",
 ]
 
 PAGE_TIMEOUT_MS   = 30_000
@@ -442,6 +454,70 @@ def scrape_facebook(prefs: dict) -> list[dict]:
             print(f"  [facebook] Group error: {e}")
 
     print(f"  [facebook] Total: {len(all_listings)} listings")
+    return all_listings
+
+
+# ── Graph API scraper (uses user's long-lived token) ─────────────────────────
+
+def scrape_groups_with_token(long_lived_token: str, prefs: dict) -> list[dict]:
+    """
+    Use a user's 60-day long-lived Facebook token to fetch posts from public
+    Pune rental groups via the Graph API.
+
+    Why Graph API over Camoufox here:
+      - No App Review required for PUBLIC groups
+      - Clean JSON response — no HTML parsing needed
+      - Works inside FastAPI request cycle (no browser binary required)
+
+    Falls back gracefully per group: if a group denies access (private), it
+    just skips that group and continues with the rest.
+    """
+    try:
+        import httpx as _httpx
+    except ImportError:
+        print("  [facebook] httpx not installed — run: pip install httpx")
+        return []
+
+    lo  = prefs.get("budget_min", 5_000)
+    hi  = prefs.get("budget_max", 1_20_000)
+    all_listings: list[dict] = []
+
+    for group_slug in PUNE_GROUP_SLUGS:
+        try:
+            resp = _httpx.get(
+                f"https://graph.facebook.com/v19.0/{group_slug}/feed",
+                params={
+                    "access_token": long_lived_token,
+                    "fields":       "id,message,created_time,permalink_url,full_picture",
+                    "limit":        50,
+                },
+                timeout=15,
+            )
+            if not resp.is_success:
+                print(f"  [facebook] Graph API group '{group_slug}': HTTP {resp.status_code} — skipped")
+                continue
+
+            posts = resp.json().get("data", [])
+            group_listings = 0
+            for post in posts:
+                msg      = post.get("message", "")
+                raw_id   = post.get("id", "")
+                pid      = f"grp_{raw_id.replace('.', '_').replace('_', '', 1)}"
+                post_url = post.get("permalink_url", "")
+                listing  = _parse_post_text(msg, pid, post_url, f"group:{group_slug}")
+                if listing:
+                    price = listing.get("price") or 0
+                    if price == 0 or (lo <= price <= hi):
+                        if post.get("full_picture"):
+                            listing["images"] = [post["full_picture"]]
+                        all_listings.append(listing)
+                        group_listings += 1
+
+            print(f"  [facebook] Graph API '{group_slug}': {group_listings} listings")
+        except Exception as e:
+            print(f"  [facebook] Graph API group '{group_slug}' error: {e}")
+
+    print(f"  [facebook] Graph API total: {len(all_listings)} listings")
     return all_listings
 
 

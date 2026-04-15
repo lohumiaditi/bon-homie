@@ -18,6 +18,7 @@ import asyncio
 import os
 import sys
 import uuid
+from datetime import datetime, timezone
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, Response, Cookie, Depends
@@ -306,6 +307,37 @@ def facebook_token_login(request_body: dict, response: Response):
     response.set_cookie(COOKIE_REFRESH, refresh_jwt,
         httponly=True, secure=is_prod, samesite="lax", max_age=86_400 * 30)
 
+    # 4. Exchange short-lived token for a 60-day long-lived token.
+    #    Stored encrypted in the users table for Facebook group scraping.
+    if app_id and app_secret and db_user.get("fb_id"):
+        try:
+            from datetime import timedelta
+            from agents.auth_agent import encrypt
+            ll = httpx.get(
+                "https://graph.facebook.com/v19.0/oauth/access_token",
+                params={
+                    "grant_type":       "fb_exchange_token",
+                    "client_id":        app_id,
+                    "client_secret":    app_secret,
+                    "fb_exchange_token": access_token,
+                },
+                timeout=10,
+            )
+            if ll.is_success:
+                ll_json     = ll.json()
+                ll_token    = ll_json.get("access_token", "")
+                ll_exp_secs = ll_json.get("expires_in", 5_184_000)  # 60 days
+                expires_at  = datetime.now(timezone.utc) + timedelta(seconds=ll_exp_secs)
+                if ll_token:
+                    from db.client import db as get_db
+                    get_db().table("users").update({
+                        "fb_token_enc":        encrypt(ll_token),
+                        "fb_token_expires_at": expires_at.isoformat(),
+                    }).eq("fb_id", db_user["fb_id"]).execute()
+        except Exception as e:
+            # Non-fatal — login still succeeds without the long-lived token
+            print(f"  [auth] long-lived token exchange failed: {e}")
+
     return {"ok": True, "name": db_user["name"], "picture_url": db_user["picture_url"]}
 
 
@@ -368,10 +400,37 @@ def health():
 
 
 @app.post("/search")
-def start_search(req: SearchRequest, background_tasks: BackgroundTasks):
+def start_search(
+    req: SearchRequest,
+    background_tasks: BackgroundTasks,
+    fh_token: Optional[str] = Cookie(default=None),
+):
     session_id = str(uuid.uuid4())
     prefs = req.model_dump()
     prefs["city"] = "Pune"
+
+    # If the user is logged in, attach their long-lived FB token to prefs so the
+    # orchestrator can use it to scrape Facebook rental groups via Graph API.
+    if fh_token:
+        try:
+            from agents.auth_agent import verify_token, decrypt
+            from db.client import db as get_db
+            payload = verify_token(fh_token, expected_type="access")
+            user_id = payload.get("sub", "")
+            if user_id:
+                result = get_db().table("users").select(
+                    "fb_token_enc,fb_token_expires_at"
+                ).eq("id", user_id).execute()
+                if result.data:
+                    row = result.data[0]
+                    token_enc = row.get("fb_token_enc", "")
+                    expires   = row.get("fb_token_expires_at", "")
+                    if token_enc and expires:
+                        exp_dt = datetime.fromisoformat(expires.replace("Z", "+00:00"))
+                        if exp_dt > datetime.now(timezone.utc):
+                            prefs["user_fb_token"] = decrypt(token_enc)
+        except Exception:
+            pass  # Non-fatal — search still works without the FB token
 
     session_status[session_id] = {
         "status": "queued",

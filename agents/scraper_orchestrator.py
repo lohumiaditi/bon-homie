@@ -23,7 +23,7 @@ from datetime import datetime, timezone, timedelta
 
 from rapidfuzz import fuzz
 from agents.scrapers.camoufox_scraper import scrape_all_with_camoufox
-from agents.scrapers.facebook import scrape_facebook
+from agents.scrapers.facebook_agent import scrape_facebook, scrape_groups_with_token
 from agents.scrapers.base import save_listings
 
 DEDUP_THRESHOLD   = 85
@@ -117,13 +117,32 @@ def orchestrate(prefs: dict) -> list[dict]:
     cached = query_supabase_listings(prefs)
     cache_ok = len(cached) >= CACHE_MIN_COUNT
 
+    # ── Facebook scraping (always runs — cache or live) ───────────────────────
+    def _run_facebook():
+        fb_listings = []
+        # Prefer Graph API with user's long-lived token (no browser, no Camoufox)
+        user_token = prefs.get("user_fb_token", "")
+        if user_token:
+            try:
+                fb_listings = scrape_groups_with_token(user_token, prefs)
+                print(f"  [orchestrator] Facebook (Graph API): {len(fb_listings)} listings")
+            except Exception as e:
+                print(f"  [orchestrator] Facebook Graph API error: {e}")
+        # Fall back to Camoufox browser login (uses FB_EMAIL + FB_PASSWORD)
+        if not fb_listings:
+            try:
+                fb_listings = scrape_facebook(prefs)
+                print(f"  [orchestrator] Facebook (Camoufox): {len(fb_listings)} listings")
+            except Exception as e:
+                print(f"  [orchestrator] Facebook Camoufox error: {e}")
+        return fb_listings
+
     if cache_ok:
         print(f"  [orchestrator] Cache warm ({len(cached)} listings). Running Facebook only.")
         all_listings.extend(cached)
         try:
-            fb = scrape_facebook(prefs)
+            fb = _run_facebook()
             all_listings.extend(fb)
-            print(f"  [orchestrator] Facebook: {len(fb)} listings")
         except Exception as e:
             print(f"  [orchestrator] Facebook failed: {e}")
 
@@ -132,7 +151,7 @@ def orchestrate(prefs: dict) -> list[dict]:
         with ThreadPoolExecutor(max_workers=2) as executor:
             futures = {
                 executor.submit(scrape_all_with_camoufox, prefs, 1): "Camoufox",
-                executor.submit(scrape_facebook, prefs):              "Facebook",
+                executor.submit(_run_facebook):                       "Facebook",
             }
             for future in as_completed(futures):
                 name = futures[future]

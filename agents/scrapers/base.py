@@ -309,15 +309,28 @@ except ImportError:
 
 
 # ── Supabase persistence ──────────────────────────────────────────────────────
+
+# Exact columns that exist in the Supabase `listings` table.
+# Any extra keys on listing dicts (e.g. "source", "id") are silently stripped
+# before the upsert so schema-mismatches never kill a whole scrape run.
+_SAVE_COLUMNS = {
+    "platform", "listing_id", "url", "title", "price", "area_name", "address",
+    "city", "furnishing", "renter_type", "gender", "occupancy", "brokerage",
+    "images", "contact_raw", "contact", "lat", "lng", "last_scraped_at",
+}
+
+
 def save_listings(listings: list[dict]) -> int:
     """
     Upsert listings to Supabase one row at a time.
+    - Strips unknown columns (e.g. 'source', 'id') using _SAVE_COLUMNS whitelist
+      so schema mismatches never silently drop an entire scrape run.
+    - Generates a fallback listing_id from the URL if the scraper left it blank.
     - Single-row upserts are immune to 'ON CONFLICT DO UPDATE command cannot
-      affect row a second time' — that error only occurs with batch upserts
-      containing duplicate conflict keys.
+      affect row a second time' — that error only occurs in batch upserts.
     - On conflict (same platform + listing_id): updates the row INCLUDING
       last_scraped_at, so the freshness filter in scraper_orchestrator works.
-    - Errors on individual rows are caught and skipped — one bad row never
+    - Errors on individual rows are caught and logged — one bad row never
       aborts the whole save.
     - Returns count of rows successfully written.
     """
@@ -328,10 +341,19 @@ def save_listings(listings: list[dict]) -> int:
     client = db()
     ts = datetime.now(timezone.utc).isoformat()
 
-    # Build rows, dedup in Python first as a cheap pre-filter
+    # Build rows: strip unknown columns + id, add last_scraped_at, ensure listing_id
     seen: dict = {}
     for l in listings:
-        row = {**{k: v for k, v in l.items() if k != "id"}, "last_scraped_at": ts}
+        row = {k: v for k, v in l.items() if k in _SAVE_COLUMNS}
+        row["last_scraped_at"] = ts
+
+        # Generate listing_id from URL tail if scraper left it blank
+        if not row.get("listing_id"):
+            if row.get("url"):
+                row["listing_id"] = row["url"].rstrip("/").split("/")[-1][:64]
+            else:
+                continue  # no way to identify this row — skip
+
         key = (row.get("platform"), row.get("listing_id"))
         seen[key] = row
 
