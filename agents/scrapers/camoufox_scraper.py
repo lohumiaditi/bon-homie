@@ -386,9 +386,54 @@ def run_batch_scrape():
     """
     Scrapes TOP_20_AREAS × 5 sites and saves everything to Supabase.
     Called from GitHub Actions: python agents/scrapers/camoufox_scraper.py
+
+    Strategy:
+      1. If APIFY_KEY is set → use Apify (residential proxies, real Chromium, cloud)
+         This is the ONLY approach that reliably bypasses Cloudflare/Akamai on all 5 sites.
+      2. Otherwise → fall back to local Camoufox (works for testing; sites will bot-block it)
     """
     from dotenv import load_dotenv
     load_dotenv()
+
+    apify_key = os.environ.get("APIFY_KEY") or os.environ.get("APIFY_API_TOKEN", "")
+
+    if apify_key:
+        _batch_with_apify()
+    else:
+        print("[batch] No APIFY_KEY set — falling back to local Camoufox (expect bot blocks)")
+        _batch_with_camoufox()
+
+
+def _batch_with_apify():
+    """Run all 20 areas × 5 sites in ONE Apify actor call."""
+    from agents.scrapers.apify_browser import scrape_batch_with_apify
+    from agents.scrapers.base import save_listings
+
+    print(f"[batch] Apify batch scrape: {len(TOP_20_AREAS)} areas × 5 sites")
+    print(f"[batch] Budget range: Rs.{BATCH_BUDGET_MIN} - Rs.{BATCH_BUDGET_MAX}")
+
+    listings = scrape_batch_with_apify(TOP_20_AREAS, BATCH_BUDGET_MIN, BATCH_BUDGET_MAX)
+
+    total_saved = 0
+    if listings:
+        by_plat = {}
+        for l in listings:
+            p = l.get("platform", "?")
+            by_plat[p] = by_plat.get(p, 0) + 1
+        print(f"[batch] By platform: {dict(sorted(by_plat.items()))}")
+        saved = save_listings(listings)
+        total_saved += saved
+        print(f"[batch] {saved} rows written to Supabase")
+    else:
+        print("[batch] Apify returned 0 listings")
+
+    # Facebook (runs once regardless)
+    _batch_facebook(total_saved)
+
+
+def _batch_with_camoufox():
+    """Local Camoufox fallback — area by area (slow, likely bot-blocked on live sites)."""
+    from agents.scrapers.base import save_listings
 
     print(f"[batch] Camoufox batch scrape: {len(TOP_20_AREAS)} areas × 5 sites")
     print(f"[batch] Budget range: Rs.{BATCH_BUDGET_MIN} - Rs.{BATCH_BUDGET_MAX}")
@@ -404,7 +449,7 @@ def run_batch_scrape():
             for l in listings:
                 l["city"] = "Pune"
             area_listings.extend(listings)
-            time.sleep(random.uniform(3.0, 6.0))  # polite delay between sites
+            time.sleep(random.uniform(3.0, 6.0))
 
         if area_listings:
             by_plat = {}
@@ -412,7 +457,6 @@ def run_batch_scrape():
                 p = l.get("platform", "?")
                 by_plat[p] = by_plat.get(p, 0) + 1
             print(f"  [batch] {area}: {len(area_listings)} scraped {dict(sorted(by_plat.items()))}")
-            # Show sample IDs to detect repeated featured-listing collisions
             sample = [(l.get("platform"), l.get("listing_id"), l.get("price")) for l in area_listings[:5]]
             print(f"  [batch] {area}: sample = {sample}")
             saved = save_listings(area_listings)
@@ -421,13 +465,18 @@ def run_batch_scrape():
         else:
             print(f"  [batch] {area}: 0 listings (all sites blocked or no cards)")
 
-        # Longer delay between areas
         if i < len(TOP_20_AREAS):
             delay = random.uniform(8.0, 15.0)
             print(f"  [batch] Waiting {delay:.1f}s before next area...")
             time.sleep(delay)
 
-    # Facebook Marketplace + Groups (runs once, not per area)
+    _batch_facebook(total_saved)
+
+
+def _batch_facebook(total_saved: int):
+    """Run Facebook scraper once and print final total."""
+    from agents.scrapers.base import save_listings
+
     print(f"\n[batch] ── Facebook Marketplace + Groups ──")
     try:
         from agents.scrapers.facebook_agent import scrape_facebook
