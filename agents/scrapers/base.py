@@ -13,6 +13,7 @@ Two scraper bases are provided:
 Helper functions (empty_listing, extract_price, etc.) are shared.
 """
 
+import hashlib
 import random
 import re
 import time
@@ -319,20 +320,48 @@ _SAVE_COLUMNS = {
     "images", "contact_raw", "contact", "lat", "lng", "last_scraped_at",
 }
 
+# Generic URL slugs that are NOT property-specific IDs.
+# These appear as the last URL segment on search/category pages.
+_GENERIC_SLUGS = {
+    "pune", "rent", "residential", "property", "flats", "apartment",
+    "residential-real-estate", "search", "index", "listing", "results",
+}
+
+
+def _is_valid_listing_id(lid: str) -> bool:
+    """Real property IDs always contain digits (e.g. '12345678', 'prop-9876543-baner').
+    Generic search-page slugs like 'flats-in-kothrud-pune' or 'pune' are not valid."""
+    if not lid or len(lid) < 4:
+        return False
+    if lid.lower() in _GENERIC_SLUGS:
+        return False
+    return any(c.isdigit() for c in lid)
+
+
+def _content_hash_id(row: dict) -> str:
+    """Stable 16-char hex ID derived from listing content (platform+title+price+area).
+    Used as last-resort fallback when no URL-based property ID is available."""
+    parts = "|".join([
+        str(row.get("platform", "")),
+        str(row.get("title", "")),
+        str(row.get("price", "")),
+        str(row.get("area_name", "")),
+    ])
+    return hashlib.md5(parts.encode()).hexdigest()[:16]
+
 
 def save_listings(listings: list[dict]) -> int:
     """
     Upsert listings to Supabase one row at a time.
-    - Strips unknown columns (e.g. 'source', 'id') using _SAVE_COLUMNS whitelist
-      so schema mismatches never silently drop an entire scrape run.
-    - Generates a fallback listing_id from the URL if the scraper left it blank.
-    - Single-row upserts are immune to 'ON CONFLICT DO UPDATE command cannot
-      affect row a second time' — that error only occurs in batch upserts.
-    - On conflict (same platform + listing_id): updates the row INCLUDING
-      last_scraped_at, so the freshness filter in scraper_orchestrator works.
-    - Errors on individual rows are caught and logged — one bad row never
-      aborts the whole save.
-    - Returns count of rows successfully written.
+
+    listing_id validation order:
+      1. Use the scraper-supplied listing_id if it passes _is_valid_listing_id()
+      2. Try the last URL path segment
+      3. Fall back to a content-hash of (platform, title, price, area_name)
+      4. Skip the row if we still have nothing (no price AND no title)
+
+    This prevents generic slugs like 'flats-in-kothrud-pune' from collapsing
+    all area searches into a handful of fake unique rows.
     """
     if not listings:
         return 0
@@ -341,21 +370,42 @@ def save_listings(listings: list[dict]) -> int:
     client = db()
     ts = datetime.now(timezone.utc).isoformat()
 
-    # Build rows: strip unknown columns + id, add last_scraped_at, ensure listing_id
     seen: dict = {}
+    skipped_no_id = 0
+    skipped_no_content = 0
+
     for l in listings:
         row = {k: v for k, v in l.items() if k in _SAVE_COLUMNS}
         row["last_scraped_at"] = ts
 
-        # Generate listing_id from URL tail if scraper left it blank
-        if not row.get("listing_id"):
-            if row.get("url"):
-                row["listing_id"] = row["url"].rstrip("/").split("/")[-1][:64]
-            else:
-                continue  # no way to identify this row — skip
+        # Quality gate: skip obviously empty rows (no price AND no title)
+        if not row.get("price") and not row.get("title"):
+            skipped_no_content += 1
+            continue
 
-        key = (row.get("platform"), row.get("listing_id"))
+        # Resolve listing_id
+        lid = row.get("listing_id", "")
+        if not _is_valid_listing_id(lid):
+            # Try URL tail
+            url_tail = (row.get("url") or "").rstrip("/").split("/")[-1][:64]
+            if _is_valid_listing_id(url_tail):
+                lid = url_tail
+            else:
+                # Content-hash fallback (requires at least price or title — guaranteed above)
+                lid = _content_hash_id(row)
+
+        if not lid:
+            skipped_no_id += 1
+            continue
+
+        row["listing_id"] = lid
+        key = (row.get("platform"), lid)
         seen[key] = row
+
+    if skipped_no_content:
+        print(f"  [save] skipped {skipped_no_content} empty rows (no price + no title)")
+    if skipped_no_id:
+        print(f"  [save] skipped {skipped_no_id} rows with no usable listing_id")
 
     saved = 0
     for row in seen.values():

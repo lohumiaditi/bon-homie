@@ -232,13 +232,33 @@ def _parse_html(html: str, platform: str, source_url: str) -> list[dict]:
     parsers = _get_parsers()
     parse_fn = parsers.get(platform)
 
+    from agents.scrapers.base import _is_valid_listing_id
+
+    # Diagnostic: report how many cards the CSS selectors matched
+    print(f"  [camoufox] {platform}: {len(cards)} cards matched in HTML (len={len(html)})")
+    if cards:
+        sample_link = cards[0].find("a", href=True)
+        sample_href = sample_link.get("href", "none")[:80] if sample_link else "no-link"
+        print(f"  [camoufox] {platform}: first card link = {sample_href}")
+
     listings = []
     for card in cards[:30]:
+        # Try data-attribute IDs first — these are the most reliable source
+        data_id = ""
+        for attr in ("data-listing-id", "data-property-id", "data-propid", "data-id"):
+            val = card.get(attr, "")
+            if val and any(c.isdigit() for c in str(val)):
+                data_id = str(val)[:64]
+                break
+
         if parse_fn:
             l = parse_fn(card)
             l["city"] = "Pune"
-            # Ensure listing_id is populated if parser missed it
-            if not l.get("listing_id"):
+            # Override with data-attribute ID if the parser's URL-based ID looks generic
+            if data_id and not _is_valid_listing_id(l.get("listing_id", "")):
+                l["listing_id"] = data_id
+            # URL-based fallback if parser still has no valid ID
+            if not _is_valid_listing_id(l.get("listing_id", "")):
                 link = card.find("a", href=True)
                 if link:
                     href = link["href"]
@@ -249,9 +269,16 @@ def _parse_html(html: str, platform: str, source_url: str) -> list[dict]:
                     l["listing_id"] = href.rstrip("/").split("/")[-1]
         else:
             l = _generic_extract(card, platform, source_url)
+            if data_id and not _is_valid_listing_id(l.get("listing_id", "")):
+                l["listing_id"] = data_id
 
         if l and (l.get("listing_id") or l.get("url")):
             listings.append(l)
+
+    # Diagnostic: show sample listing IDs extracted
+    if listings:
+        sample_ids = [f"{l.get('platform')}:{l.get('listing_id','?')}" for l in listings[:3]]
+        print(f"  [camoufox] {platform}: sample IDs = {sample_ids}")
 
     return listings
 
@@ -380,11 +407,19 @@ def run_batch_scrape():
             time.sleep(random.uniform(3.0, 6.0))  # polite delay between sites
 
         if area_listings:
+            by_plat = {}
+            for l in area_listings:
+                p = l.get("platform", "?")
+                by_plat[p] = by_plat.get(p, 0) + 1
+            print(f"  [batch] {area}: {len(area_listings)} scraped {dict(sorted(by_plat.items()))}")
+            # Show sample IDs to detect repeated featured-listing collisions
+            sample = [(l.get("platform"), l.get("listing_id"), l.get("price")) for l in area_listings[:5]]
+            print(f"  [batch] {area}: sample = {sample}")
             saved = save_listings(area_listings)
             total_saved += saved
-            print(f"  [batch] {area}: {len(area_listings)} scraped, {saved} new → Supabase")
+            print(f"  [batch] {area}: {saved} rows written to Supabase")
         else:
-            print(f"  [batch] {area}: 0 listings (site may have blocked this area)")
+            print(f"  [batch] {area}: 0 listings (all sites blocked or no cards)")
 
         # Longer delay between areas
         if i < len(TOP_20_AREAS):
