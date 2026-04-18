@@ -378,8 +378,8 @@ def save_listings(listings: list[dict]) -> int:
         row = {k: v for k, v in l.items() if k in _SAVE_COLUMNS}
         row["last_scraped_at"] = ts
 
-        # Quality gate: skip obviously empty rows (no price AND no title)
-        if not row.get("price") and not row.get("title"):
+        # Quality gate: price is required — priceless listings are useless
+        if not row.get("price"):
             skipped_no_content += 1
             continue
 

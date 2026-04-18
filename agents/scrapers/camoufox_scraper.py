@@ -399,8 +399,12 @@ def run_batch_scrape():
 
     if apify_key:
         _batch_with_apify()
+    elif sys.platform == "win32":
+        print("[batch] Windows + no APIFY_KEY = no real scraping possible.")
+        print("[batch] All 5 sites block Camoufox on Windows (Cloudflare/Akamai).")
+        print("[batch] Trigger GitHub Actions instead — it has APIFY_KEY in secrets.")
     else:
-        print("[batch] No APIFY_KEY set — falling back to local Camoufox (expect bot blocks)")
+        print("[batch] No APIFY_KEY set — falling back to local Camoufox (expect bot blocks on some sites)")
         _batch_with_camoufox()
 
 
