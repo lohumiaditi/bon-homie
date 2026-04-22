@@ -21,10 +21,23 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE INDEX IF NOT EXISTS idx_users_fb_id ON users(fb_id);
 
 -- ── Row Level Security ─────────────────────────────────────────────────────
--- Auth is handled at the FastAPI layer (JWT verification).
--- RLS is disabled so the anon key used by supabase-py can insert/update users.
--- For production, consider switching to a service-role key and re-enabling RLS.
-ALTER TABLE users DISABLE ROW LEVEL SECURITY;
+-- Backend uses SUPABASE_SERVICE_KEY (service_role) which bypasses RLS.
+-- Anon key (used by frontend if ever needed) cannot touch users at all.
+-- RLS on users: only service_role can read/write. Anon = zero access.
+ALTER TABLE users ENABLE ROW LEVEL SECURITY;
+-- No policies → anon key has zero access. service_role bypasses RLS entirely.
+
+-- listings: service_role writes (scraper). Anon can only SELECT (public data).
+ALTER TABLE listings ENABLE ROW LEVEL SECURITY;
+CREATE POLICY IF NOT EXISTS "listings_anon_select"
+    ON listings FOR SELECT TO anon USING (true);
+
+-- user_preferences: service_role manages. Anon cannot access.
+ALTER TABLE user_preferences ENABLE ROW LEVEL SECURITY;
+
+-- filtered_listings, ranked_results: service_role only.
+ALTER TABLE filtered_listings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE ranked_results    ENABLE ROW LEVEL SECURITY;
 
 
 -- 1. User Preferences
