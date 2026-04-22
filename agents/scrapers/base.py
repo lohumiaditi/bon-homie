@@ -127,13 +127,25 @@ def normalize_furnishing(text: str) -> Optional[str]:
 # ── Price extractor ───────────────────────────────────────────────────────────
 def extract_price(text: str) -> Optional[int]:
     """
-    Extract integer rent from short price strings like '12,500/month' or 'Rs.12500'.
-    Returns None if the value is outside a plausible rent range (1k – 5L).
+    Extract integer rent from price strings.
+    Handles: '12,500/month', 'Rs.12500', '1.5 L', '2.7 Lakh', '₹48,000'.
+    Returns None if outside plausible rent range (1k – 10L).
     """
-    digits = re.sub(r"[^\d]", "", text)
+    t = text.strip()
+    # Lakh notation: "1.5 L", "2.7 Lakh", "1.5L/month"
+    lakh_m = re.search(r'(\d+\.?\d*)\s*[Ll](?:akh|ac)?\b', t)
+    if lakh_m:
+        val = int(round(float(lakh_m.group(1)) * 100_000))
+        if 1_000 <= val <= 10_00_000:
+            return val
+    # Cr notation (skip — crore rents are not residential)
+    if re.search(r'\d\s*[Cc]r', t):
+        return None
+    # Plain digits (strip all non-digit chars)
+    digits = re.sub(r"[^\d]", "", t)
     if digits:
         val = int(digits)
-        if 1_000 <= val <= 5_00_000:
+        if 1_000 <= val <= 10_00_000:
             return val
     return None
 
@@ -191,12 +203,10 @@ def fetch_with_session(
     extra_headers: Optional[dict] = None,
 ) -> str:
     """
-    Two-step fetch that bypasses basic bot detection:
+    Two-step fetch with automatic cloudscraper fallback.
       1. Visit the site homepage first to collect cookies + session tokens.
       2. Fetch the actual search URL with those cookies + a Referer header.
-
-    Use this instead of fetch_with_requests() for sites that return 403
-    on direct requests (99Acres, MagicBricks, Housing, etc.).
+      3. If that returns empty/blocked HTML, fall back to cloudscraper (handles CF JS challenges).
     """
     ua = random.choice(USER_AGENTS)
     headers = {**_HEADERS_BASE, "User-Agent": ua}
@@ -214,7 +224,59 @@ def fetch_with_session(
         print(f"    [fetch] Session warm failed ({e}). Trying direct fetch...")
 
     # Step 2 — fetch the actual search page with warmed session
-    return _do_get(session, search_url, headers, retries, base_delay)
+    result = _do_get(session, search_url, headers, retries, base_delay)
+
+    # Step 3 — cloudscraper fallback (handles Cloudflare JS challenges)
+    if not result:
+        result = fetch_with_cloudscraper(search_url, base_url, extra_headers)
+
+    return result
+
+
+def fetch_with_cloudscraper(
+    url: str,
+    base_url: Optional[str] = None,
+    extra_headers: Optional[dict] = None,
+) -> str:
+    """
+    Fetch a page using cloudscraper, which solves Cloudflare JS challenges automatically.
+    Falls back to empty string if cloudscraper is not installed or the request fails.
+    Works for Cloudflare-protected sites (NoBroker, 99acres, MagicBricks, SquareYards).
+    Does NOT work for Akamai-protected sites (Housing.com).
+    """
+    try:
+        import cloudscraper
+    except ImportError:
+        print("    [cloudscraper] Not installed. Run: pip install cloudscraper")
+        return ""
+
+    try:
+        scraper = cloudscraper.create_scraper(
+            browser={"browser": "chrome", "platform": "linux", "mobile": False},
+            delay=5,
+        )
+        headers = {**_HEADERS_BASE, "User-Agent": random.choice(USER_AGENTS)}
+        if extra_headers:
+            headers.update(extra_headers)
+        scraper.headers.update(headers)
+
+        if base_url:
+            try:
+                scraper.get(base_url, timeout=20)
+                time.sleep(random.uniform(0.8, 1.5))
+                scraper.headers.update({"Referer": base_url})
+            except Exception:
+                pass
+
+        resp = scraper.get(url, timeout=30)
+        if resp.status_code == 200:
+            print(f"    [cloudscraper] OK: {url[:60]}")
+            return resp.text
+        print(f"    [cloudscraper] HTTP {resp.status_code}: {url[:60]}")
+        return ""
+    except Exception as e:
+        print(f"    [cloudscraper] Error: {e}")
+        return ""
 
 
 # ── Requests-based scraper base class ────────────────────────────────────────

@@ -2,7 +2,17 @@
 99Acres Scraper
 ---------------
 Scrapes rental listings from 99acres.com for Pune.
-Uses requests + BeautifulSoup — no browser or Playwright needed.
+Uses curl_cffi Chrome impersonation to bypass TLS fingerprint detection.
+Standard requests/httpx are blocked; curl_cffi is required.
+
+Working URL format (confirmed 2026):
+    /property-for-rent-in-{area}-pune-ffid   (area-specific)
+    /property-for-rent-in-pune-ffid          (city-wide fallback)
+
+Working card selector (confirmed 2026):
+    [data-label^="FSL_TUPLE"]  — top-level listing cards
+    .tupleNew__priceValWrap    — price
+    .tupleNew__propType        — title
 
 Run standalone:
     python agents/scrapers/ninetynineacres.py
@@ -10,106 +20,96 @@ Run standalone:
 
 import sys
 import os
+import re
+import time
+import random
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from urllib.parse import urlencode
+try:
+    from curl_cffi import requests as cffi_requests
+    _HAS_CURL_CFFI = True
+except ImportError:
+    import requests as cffi_requests
+    _HAS_CURL_CFFI = False
+    print("  [99acres] WARNING: curl_cffi not installed — requests will likely be blocked")
+
 from bs4 import BeautifulSoup
 from agents.scrapers.base import (
-    RequestsScraper, fetch_with_session,
-    empty_listing, normalize_phone, normalize_furnishing,
+    RequestsScraper,
+    empty_listing, normalize_furnishing,
     extract_price, save_listings,
 )
 
 BASE_URL = "https://www.99acres.com"
 
+_HEADERS = {
+    "accept-language": "en-IN,en-GB;q=0.9,en;q=0.8,hi;q=0.7",
+    "referer": BASE_URL + "/",
+}
 
-def build_search_url(prefs: dict, page: int = 1) -> str:
-    """Build 99Acres search URL from user preferences."""
-    params = {
-        "search_type": "rent",
-        "city": "9",           # Pune city code
-        "property_type": "3",  # Residential flat
-        "min_budget": prefs.get("budget_min", ""),
-        "max_budget": prefs.get("budget_max", ""),
-        "page": page,
-    }
-    furnishing = prefs.get("furnishing", "any")
-    if furnishing == "furnished":
-        params["furnished_type"] = "1"
-    elif furnishing == "semi-furnished":
-        params["furnished_type"] = "2"
-    elif furnishing == "unfurnished":
-        params["furnished_type"] = "3"
 
-    areas = prefs.get("areas", [])
-    area_slug = "-".join(a.lower().replace(" ", "-") for a in areas[:2]) if areas else "pune"
-    qs = urlencode({k: v for k, v in params.items() if v != ""})
-    return f"{BASE_URL}/property-for-rent-in-{area_slug}-9?{qs}"
+def build_search_url(area: str, page: int = 1) -> str:
+    """Build 99acres rent search URL. Confirmed format: -ffid suffix."""
+    area_slug = area.lower().replace(" ", "-")
+    url = f"{BASE_URL}/property-for-rent-in-{area_slug}-pune-ffid"
+    if page > 1:
+        url += f"?page={page}"
+    return url
 
 
 def parse_listing_card(card_soup) -> dict:
-    """Parse one listing card from 99Acres search results HTML."""
     listing = empty_listing()
     listing["platform"] = "99acres"
     try:
-        # Title
+        # Title — confirmed class
         title_el = (
-            card_soup.select_one("a.srpTitle") or
-            card_soup.select_one("[class*='title']") or
-            card_soup.select_one("h2")
+            card_soup.select_one(".tupleNew__propType") or
+            card_soup.select_one(".tupleNew__propertyHeading") or
+            card_soup.select_one("[class*='propType']") or
+            card_soup.select_one("[class*='propertyHeading']")
         )
         if title_el:
             listing["title"] = title_el.get_text(strip=True)
 
-        # listing_id: prefer data-* attributes, fall back to URL tail
+        # URL and listing_id
+        link = card_soup.select_one("a[href*='99acres']") or card_soup.select_one("a[href]")
+        if link:
+            href = link.get("href", "")
+            if href.startswith("/"):
+                href = BASE_URL + href
+            listing["url"] = href
+            # ID from URL slug tail (alphanumeric + hyphens)
+            listing["listing_id"] = href.rstrip("/").split("/")[-1]
+
+        # data-* attribute ID override if available and numeric
         for attr in ("data-listing-id", "data-property-id", "data-propid", "data-id"):
             val = card_soup.get(attr, "")
             if val and any(c.isdigit() for c in str(val)):
                 listing["listing_id"] = str(val)[:64]
                 break
 
-        # URL + listing ID
-        link = (
-            card_soup.select_one("a[href*='/property/']") or
-            card_soup.select_one("a[href*='99acres']") or
-            card_soup.select_one("a[href]")
-        )
-        if link:
-            href = link.get("href", "")
-            if href.startswith("/"):
-                href = BASE_URL + href
-            listing["url"] = href
-            if not listing["listing_id"]:
-                listing["listing_id"] = href.rstrip("/").split("/")[-1] or href
-
-        # Price
+        # Price — confirmed class: .tupleNew__priceValWrap
         price_el = (
-            card_soup.select_one("[class*='price']") or
-            card_soup.select_one("[class*='Price']") or
-            card_soup.select_one("[class*='amount']")
+            card_soup.select_one(".tupleNew__priceValWrap") or
+            card_soup.select_one("[class*='priceValWrap']") or
+            card_soup.select_one("[class*='price']")
         )
         if price_el:
             listing["price"] = extract_price(price_el.get_text())
 
-        # Location
-        loc_el = (
-            card_soup.select_one("[class*='locality']") or
-            card_soup.select_one("[class*='location']") or
-            card_soup.select_one("[class*='address']")
-        )
-        if loc_el:
-            text = loc_el.get_text(strip=True)
-            listing["area_name"] = text.split(",")[0]
-            listing["address"] = text
+        # Location — extract from title text: "2 BHK ... in {Area}, Pune"
+        if listing["title"]:
+            in_match = re.search(r'\bin\s+([\w\s]+),\s*Pune', listing["title"], re.I)
+            if in_match:
+                listing["area_name"] = in_match.group(1).strip()
+                listing["address"] = listing["area_name"] + ", Pune"
 
         # Furnishing
-        for el in card_soup.find_all(["span", "div", "li"]):
-            furn = normalize_furnishing(el.get_text(strip=True))
-            if furn:
-                listing["furnishing"] = furn
-                break
+        card_text = card_soup.get_text(" ", strip=True)
+        listing["furnishing"] = normalize_furnishing(card_text) or None
 
-        # Images — grab all img tags, filter out logos/placeholders
+        # Images
         image_urls = []
         for img in card_soup.find_all("img"):
             src = img.get("data-src") or img.get("data-lazy") or img.get("src") or ""
@@ -119,98 +119,96 @@ def parse_listing_card(card_soup) -> dict:
                 and "logo" not in src.lower()
                 and "icon" not in src.lower()
                 and "default" not in src.lower()
+                and "Featured.png" not in src
+                and "Shortlist.png" not in src
             ):
                 image_urls.append(src)
-        listing["images"] = list(dict.fromkeys(image_urls))  # dedupe, preserve order
-
-        # Contact (sometimes visible in card)
-        phone_el = card_soup.select_one("[class*='phone'], [class*='contact'], [class*='mobile']")
-        if phone_el:
-            raw = phone_el.get_text()
-            listing["contact_raw"] = raw
-            listing["contact"] = normalize_phone(raw)
+        listing["images"] = list(dict.fromkeys(image_urls))
 
     except Exception:
-        pass  # partial data is fine — image filter handles quality later
+        pass
     return listing
 
 
 class NinetyNineAcresScraper(RequestsScraper):
 
     def scrape(self, prefs: dict, max_pages: int = 3) -> list[dict]:
+        areas = prefs.get("areas", [])
+        budget_min = prefs.get("budget_min", 5000)
+        budget_max = prefs.get("budget_max", 120000)
+
+        if _HAS_CURL_CFFI:
+            session = cffi_requests.Session(impersonate="chrome")
+        else:
+            import requests
+            session = requests.Session()
+
+        session.headers.update(_HEADERS)
         listings = []
 
-        for page_num in range(1, max_pages + 1):
-            url = build_search_url(prefs, page=page_num)
-            try:
-                print(f"  [99acres] Page {page_num}: {url[:80]}...")
-                html = fetch_with_session(BASE_URL, url)
-                if not html:
-                    print(f"  [99acres] Empty response on page {page_num}, stopping.")
+        for area in areas:
+            for page_num in range(1, max_pages + 1):
+                url = build_search_url(area, page=page_num)
+                try:
+                    print(f"  [99acres] {area} page {page_num}: {url[:80]}...")
+                    r = session.get(url, timeout=20, allow_redirects=True)
+                    if r.status_code != 200:
+                        print(f"  [99acres] HTTP {r.status_code}, stopping.")
+                        break
+
+                    soup = BeautifulSoup(r.text, "html.parser")
+
+                    # Primary selector: data-label^="FSL_TUPLE" (confirmed gives top-level cards)
+                    cards = soup.select('[data-label^="FSL_TUPLE"]')
+                    if not cards:
+                        cards = soup.select('[class*="Tuple"]')
+                        # Remove nested elements
+                        outer = []
+                        for c in cards:
+                            if not any(p in cards for p in c.parents):
+                                outer.append(c)
+                        cards = outer
+
+                    if not cards:
+                        print(f"  [99acres] No cards on {area} page {page_num}. HTML: {len(r.text)} chars")
+                        # Try city-wide URL as fallback on first page
+                        if page_num == 1:
+                            fallback = f"{BASE_URL}/property-for-rent-in-pune-ffid"
+                            print(f"  [99acres] Fallback: {fallback}")
+                            r2 = session.get(fallback, timeout=20, allow_redirects=True)
+                            soup = BeautifulSoup(r2.text, "html.parser")
+                            cards = soup.select('[data-label^="FSL_TUPLE"]')
+                        if not cards:
+                            break
+
+                    print(f"  [99acres] {len(cards)} cards")
+                    for card in cards:
+                        l = parse_listing_card(card)
+                        l["city"] = "Pune"
+                        if not l["area_name"]:
+                            l["area_name"] = area
+                        if l["listing_id"] and l["price"]:
+                            if budget_min <= l["price"] <= budget_max:
+                                listings.append(l)
+
+                    self.random_delay(2.5, 4.5)
+
+                except Exception as e:
+                    print(f"  [99acres] Error: {e}")
                     break
-
-                self.random_delay(1.0, 2.5)
-                soup = BeautifulSoup(html, "html.parser")
-
-                # 99Acres uses several class patterns across redesigns
-                cards = (
-                    soup.select("div[class*='srpCard']") or
-                    soup.select("div[class*='propertyCard']") or
-                    soup.select("article[class*='listing']") or
-                    soup.select("div[data-label='SRPLISTING']") or
-                    soup.select("div[class*='body_noSERP']") or
-                    soup.select("div[class*='listingContainer']")
-                )
-
-                if not cards:
-                    print(f"  [99acres] No listing cards on page {page_num}. HTML length: {len(html)}")
-                    break
-
-                print(f"  [99acres] Found {len(cards)} cards on page {page_num}")
-                for card in cards:
-                    l = parse_listing_card(card)
-                    l["city"] = "Pune"
-                    if l["listing_id"]:
-                        listings.append(l)
-
-            except Exception as e:
-                print(f"  [99acres] Error on page {page_num}: {e}")
-
-            if page_num < max_pages:
-                self.random_delay(3.0, 5.0)
 
         return listings
 
 
-# ── Standalone test ───────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    test_prefs = {
-        "city": "Pune",
-        "areas": ["Kothrud", "Baner"],
-        "budget_min": 10000,
-        "budget_max": 25000,
+    prefs = {
+        "areas": ["Kothrud"],
+        "budget_min": 8000,
+        "budget_max": 60000,
         "furnishing": "any",
     }
-
-    print("Scraping 99acres for Pune (Kothrud / Baner, Rs.10k-25k)...")
-    scraper = NinetyNineAcresScraper()
-    listings = scraper.scrape(test_prefs, max_pages=2)
-
-    print(f"\nTotal listings scraped : {len(listings)}")
-    print(f"With 3+ images         : {sum(1 for l in listings if len(l['images']) >= 3)}")
-
-    if listings:
-        print("\nSample listing:")
-        l = listings[0]
-        for k in ["title", "price", "area_name", "furnishing", "url"]:
-            print(f"  {k}: {l[k]}")
-        print(f"  images: {len(l['images'])} found")
-    else:
-        print("\nNo listings found.")
-        print("Tip: The site may render listings via JavaScript.")
-        print("     Check if the HTML contains listing data or is mostly JS.")
-
-    save_choice = input("\nSave to Supabase? (y/n) [n]: ").strip().lower()
-    if save_choice == "y":
-        count = save_listings(listings)
-        print(f"Saved {count} new listings.")
+    s = NinetyNineAcresScraper()
+    listings = s.scrape(prefs, max_pages=1)
+    print(f"\n99acres: {len(listings)} listings in budget")
+    for l in listings[:3]:
+        print(f"  [{l['listing_id'][:20]}] Rs.{l['price']:,} | {l['title'][:55]} | {len(l['images'])} imgs")

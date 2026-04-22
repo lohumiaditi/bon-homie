@@ -399,13 +399,9 @@ def run_batch_scrape():
 
     if apify_key:
         _batch_with_apify()
-    elif sys.platform == "win32":
-        print("[batch] Windows + no APIFY_KEY = no real scraping possible.")
-        print("[batch] All 5 sites block Camoufox on Windows (Cloudflare/Akamai).")
-        print("[batch] Trigger GitHub Actions instead — it has APIFY_KEY in secrets.")
     else:
-        print("[batch] No APIFY_KEY set — falling back to local Camoufox (expect bot blocks on some sites)")
-        _batch_with_camoufox()
+        print("[batch] No APIFY_KEY — using per-site scrapers with cloudscraper fallback")
+        _batch_with_site_scrapers()
 
 
 def _batch_with_apify():
@@ -472,6 +468,73 @@ def _batch_with_camoufox():
         if i < len(TOP_20_AREAS):
             delay = random.uniform(8.0, 15.0)
             print(f"  [batch] Waiting {delay:.1f}s before next area...")
+            time.sleep(delay)
+
+    _batch_facebook(total_saved)
+
+
+def _batch_with_site_scrapers():
+    """
+    Use per-site scrapers directly — one area at a time.
+    NoBroker uses internal JSON API (no bot detection).
+    Other sites use fetch_with_session() → cloudscraper fallback.
+    Works without Apify or Camoufox.
+    """
+    from agents.scrapers.base import save_listings
+    from agents.scrapers.nobroker_api     import NoBrokerApiScraper   # uses internal JSON API
+    from agents.scrapers.ninetynineacres  import NinetyNineAcresScraper
+    from agents.scrapers.housing          import HousingScraper
+    from agents.scrapers.magicbricks      import MagicBricksScraper
+    from agents.scrapers.squareyards      import SquareYardsScraper
+
+    scrapers = [
+        NoBrokerApiScraper(),     # direct API — no bot detection
+        NinetyNineAcresScraper(),
+        HousingScraper(),
+        MagicBricksScraper(),
+        SquareYardsScraper(),
+    ]
+
+    print(f"[batch] Batch scrape: {len(TOP_20_AREAS)} areas × {len(scrapers)} sites")
+    print(f"[batch] Budget range: Rs.{BATCH_BUDGET_MIN} - Rs.{BATCH_BUDGET_MAX}")
+
+    total_saved = 0
+    for i, area in enumerate(TOP_20_AREAS, 1):
+        print(f"\n[batch] ── Area {i}/{len(TOP_20_AREAS)}: {area} ──")
+        prefs = {
+            "areas":      [area],
+            "budget_min": BATCH_BUDGET_MIN,
+            "budget_max": BATCH_BUDGET_MAX,
+            "furnishing": "any",
+            "city":       "Pune",
+        }
+        area_listings = []
+
+        for scraper in scrapers:
+            name = scraper.__class__.__name__.replace("Scraper", "").lower()
+            try:
+                listings = scraper.scrape(prefs, max_pages=2)
+                print(f"  [batch] {name}: {len(listings)} listings")
+                area_listings.extend(listings)
+            except Exception as e:
+                print(f"  [batch] {name}: error — {e}")
+            time.sleep(random.uniform(1.5, 3.0))
+
+        if area_listings:
+            by_plat = {}
+            for l in area_listings:
+                p = l.get("platform", "?")
+                by_plat[p] = by_plat.get(p, 0) + 1
+            print(f"  [batch] {area}: {len(area_listings)} total {dict(sorted(by_plat.items()))}")
+            saved = save_listings(area_listings)
+            total_saved += saved
+            print(f"  [batch] {area}: {saved} rows → Supabase")
+        else:
+            print(f"  [batch] {area}: 0 listings")
+
+        if i < len(TOP_20_AREAS):
+            delay = random.uniform(5.0, 10.0)
+            print(f"  [batch] Waiting {delay:.1f}s...")
             time.sleep(delay)
 
     _batch_facebook(total_saved)
