@@ -22,6 +22,15 @@ export function AuthProvider({ children }) {
   // On mount: silently check if we already have a valid session cookie
   const checkSession = useCallback(async () => {
     setLoading(true)
+
+    // ── Local dev bypass ────────────────────────────────────────────────────
+    // Set VITE_SKIP_AUTH=true in frontend/.env to skip Facebook login locally.
+    if (import.meta.env.VITE_SKIP_AUTH === 'true') {
+      setUser({ user_id: 'local', fb_id: 'local', name: 'Local Dev', email: '' })
+      setLoading(false)
+      return
+    }
+
     try {
       const res = await fetch(`${API}/auth/me`, { credentials: 'include' })
       if (res.ok) {

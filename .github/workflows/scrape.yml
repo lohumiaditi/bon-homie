@@ -8,7 +8,7 @@ on:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 90       # 20 areas × 5 sites × ~20s + delays ≈ 45–60 min
+    timeout-minutes: 300      # ~60 areas × 4 sites × ~20s + delays ≈ 3-4 hrs
 
     steps:
       - name: Checkout code
@@ -37,9 +37,10 @@ jobs:
         run: python -B agents/scrapers/camoufox_scraper.py
 
     env:
-      SUPABASE_URL:    ${{ secrets.SUPABASE_URL }}
-      SUPABASE_KEY:    ${{ secrets.SUPABASE_KEY }}
-      GOOGLE_MAPS_KEY: ${{ secrets.GOOGLE_MAPS_KEY }}
-      APIFY_KEY:       ${{ secrets.APIFY_KEY }}
-      FB_EMAIL:        ${{ secrets.FB_EMAIL }}
-      FB_PASSWORD:     ${{ secrets.FB_PASSWORD }}
+      SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY:         ${{ secrets.SUPABASE_KEY }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+      GOOGLE_MAPS_KEY:      ${{ secrets.GOOGLE_MAPS_KEY }}
+      APIFY_KEY:            ${{ secrets.APIFY_KEY }}
+      FB_EMAIL:             ${{ secrets.FB_EMAIL }}
+      FB_PASSWORD:          ${{ secrets.FB_PASSWORD }}

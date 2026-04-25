@@ -10,6 +10,9 @@ Run standalone:  python agents/input_agent.py
 import os
 import sys
 import uuid
+
+# Make sure the project root (bon homie/) is on the path so `db` is importable
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from typing import Optional
 
 from pydantic import BaseModel, field_validator, model_validator

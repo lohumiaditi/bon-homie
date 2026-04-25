@@ -130,6 +130,20 @@ def parse_listing_card(card_soup) -> dict:
     return listing
 
 
+def _extract_cards(soup) -> list:
+    """Return top-level listing cards from parsed HTML."""
+    cards = soup.select('[data-label^="FSL_TUPLE"]')
+    if not cards:
+        # Fallback: [class*="Tuple"] but strip nested duplicates
+        all_tuple = soup.select('[class*="Tuple"]')
+        seen = set()
+        for c in all_tuple:
+            if not any(id(p) in seen for p in c.parents):
+                seen.add(id(c))
+                cards.append(c)
+    return cards
+
+
 class NinetyNineAcresScraper(RequestsScraper):
 
     def scrape(self, prefs: dict, max_pages: int = 3) -> list[dict]:
@@ -144,58 +158,82 @@ class NinetyNineAcresScraper(RequestsScraper):
             session = requests.Session()
 
         session.headers.update(_HEADERS)
+
+        # rapidfuzz for area-name matching against city-wide results
+        try:
+            from rapidfuzz import fuzz as _fuzz
+        except ImportError:
+            _fuzz = None
+
+        def _in_budget(l: dict) -> bool:
+            p = l.get("price")
+            return p is not None and budget_min <= p <= budget_max
+
+        def _area_match(l: dict, target: str) -> bool:
+            an = (l.get("area_name") or "").lower()
+            tl = target.lower()
+            if _fuzz:
+                return _fuzz.partial_ratio(an, tl) >= 65
+            return tl in an or an in tl
+
+        def _fetch_and_parse(url: str) -> list[dict]:
+            try:
+                r = session.get(url, timeout=20, allow_redirects=True)
+                if r.status_code != 200:
+                    print(f"  [99acres] HTTP {r.status_code}: {url[:70]}")
+                    return []
+                return _extract_cards(BeautifulSoup(r.text, "html.parser"))
+            except Exception as e:
+                print(f"  [99acres] Fetch error: {e}")
+                return []
+
         listings = []
+        seen_ids: set[str] = set()
 
         for area in areas:
+            area_results: list[dict] = []
+
+            # ── 1. Area-specific pages ─────────────────────────────────────────
             for page_num in range(1, max_pages + 1):
                 url = build_search_url(area, page=page_num)
-                try:
-                    print(f"  [99acres] {area} page {page_num}: {url[:80]}...")
-                    r = session.get(url, timeout=20, allow_redirects=True)
-                    if r.status_code != 200:
-                        print(f"  [99acres] HTTP {r.status_code}, stopping.")
-                        break
-
-                    soup = BeautifulSoup(r.text, "html.parser")
-
-                    # Primary selector: data-label^="FSL_TUPLE" (confirmed gives top-level cards)
-                    cards = soup.select('[data-label^="FSL_TUPLE"]')
-                    if not cards:
-                        cards = soup.select('[class*="Tuple"]')
-                        # Remove nested elements
-                        outer = []
-                        for c in cards:
-                            if not any(p in cards for p in c.parents):
-                                outer.append(c)
-                        cards = outer
-
-                    if not cards:
-                        print(f"  [99acres] No cards on {area} page {page_num}. HTML: {len(r.text)} chars")
-                        # Try city-wide URL as fallback on first page
-                        if page_num == 1:
-                            fallback = f"{BASE_URL}/property-for-rent-in-pune-ffid"
-                            print(f"  [99acres] Fallback: {fallback}")
-                            r2 = session.get(fallback, timeout=20, allow_redirects=True)
-                            soup = BeautifulSoup(r2.text, "html.parser")
-                            cards = soup.select('[data-label^="FSL_TUPLE"]')
-                        if not cards:
-                            break
-
-                    print(f"  [99acres] {len(cards)} cards")
-                    for card in cards:
-                        l = parse_listing_card(card)
-                        l["city"] = "Pune"
-                        if not l["area_name"]:
-                            l["area_name"] = area
-                        if l["listing_id"] and l["price"]:
-                            if budget_min <= l["price"] <= budget_max:
-                                listings.append(l)
-
-                    self.random_delay(2.5, 4.5)
-
-                except Exception as e:
-                    print(f"  [99acres] Error: {e}")
+                print(f"  [99acres] {area} page {page_num}: {url[:80]}...")
+                cards = _fetch_and_parse(url)
+                print(f"  [99acres] {len(cards)} cards")
+                if not cards:
                     break
+                for card in cards:
+                    l = parse_listing_card(card)
+                    l["city"] = "Pune"
+                    if not l["area_name"]:
+                        l["area_name"] = area
+                    lid = l.get("listing_id", "")
+                    if lid and lid not in seen_ids and _in_budget(l):
+                        seen_ids.add(lid)
+                        area_results.append(l)
+                self.random_delay(2.5, 4.5)
+
+            # ── 2. City-wide supplement if area-specific is sparse (<5 results) ─
+            if len(area_results) < 5:
+                city_url = f"{BASE_URL}/property-for-rent-in-pune-ffid"
+                print(f"  [99acres] {area}: only {len(area_results)} results — supplementing with city-wide")
+                city_cards = _fetch_and_parse(city_url)
+                print(f"  [99acres] city-wide: {len(city_cards)} cards, filtering by '{area}'")
+                matched = 0
+                for card in city_cards:
+                    l = parse_listing_card(card)
+                    l["city"] = "Pune"
+                    lid = l.get("listing_id", "")
+                    if not lid or lid in seen_ids:
+                        continue
+                    if _in_budget(l) and _area_match(l, area):
+                        seen_ids.add(lid)
+                        area_results.append(l)
+                        matched += 1
+                print(f"  [99acres] city-wide matched {matched} for '{area}'")
+                self.random_delay(2.0, 3.5)
+
+            listings.extend(area_results)
+            print(f"  [99acres] {area}: total {len(area_results)} in budget")
 
         return listings
 

@@ -29,7 +29,8 @@ ALTER TABLE users ENABLE ROW LEVEL SECURITY;
 
 -- listings: service_role writes (scraper). Anon can only SELECT (public data).
 ALTER TABLE listings ENABLE ROW LEVEL SECURITY;
-CREATE POLICY IF NOT EXISTS "listings_anon_select"
+DROP POLICY IF EXISTS "listings_anon_select" ON listings;
+CREATE POLICY "listings_anon_select"
     ON listings FOR SELECT TO anon USING (true);
 
 -- user_preferences: service_role manages. Anon cannot access.

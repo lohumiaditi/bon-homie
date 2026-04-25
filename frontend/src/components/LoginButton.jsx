@@ -20,8 +20,10 @@ const APP_ID    = import.meta.env.VITE_FB_APP_ID   // set in frontend/.env
 // Load the Facebook JS SDK once
 function loadFBSdk(appId) {
   if (window.FB) return Promise.resolve()
-  return new Promise(resolve => {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Facebook SDK timed out. Check your internet connection.')), 10_000)
     window.fbAsyncInit = () => {
+      clearTimeout(timer)
       window.FB.init({ appId, cookie: false, xfbml: false, version: 'v19.0' })
       resolve()
     }
@@ -29,6 +31,7 @@ function loadFBSdk(appId) {
     s.src = 'https://connect.facebook.net/en_US/sdk.js'
     s.async = true
     s.defer = true
+    s.onerror = () => { clearTimeout(timer); reject(new Error('Failed to load Facebook SDK.')) }
     document.body.appendChild(s)
   })
 }
@@ -58,7 +61,7 @@ export default function LoginButton() {
           else reject(new Error(resp.status === 'not_authorized'
             ? 'You declined the Facebook permission request.'
             : 'Facebook login popup was closed.'))
-        }, { scope: 'email,public_profile' })
+        }, { scope: 'public_profile' })
       )
 
       // Send access token to our backend for secure verification
@@ -70,8 +73,9 @@ export default function LoginButton() {
       })
 
       if (!res.ok) {
-        const err = await res.json()
-        throw new Error(err.detail || 'Server verification failed')
+        let detail = `Server error (${res.status})`
+        try { detail = (await res.json()).detail || detail } catch {}
+        throw new Error(detail)
       }
 
       // Backend set the JWT cookie — refresh auth state

@@ -73,7 +73,6 @@ def run_pipeline(session_id: str, prefs: dict):
     try:
         # 1. Save preferences
         session_status[session_id] = {"status": "scraping", "message": "Scraping listings...", "progress": 10}
-        from agents.input_agent import UserPreferences
         from db.client import db
         client = db()
         client.table("user_preferences").insert({
@@ -97,9 +96,20 @@ def run_pipeline(session_id: str, prefs: dict):
         raw_listings = orchestrate(prefs)
         session_status[session_id] = {"status": "filtering", "message": f"Scraped {len(raw_listings)} listings. Filtering...", "progress": 40}
 
-        # 3. Save raw listings to DB
+        # 3. Save raw listings to DB, then re-fetch with Supabase UUIDs.
+        #    Scraped listings have no `id` field — image_filter and ranking need the UUID.
         from agents.scrapers.base import save_listings
         save_listings(raw_listings)
+        try:
+            _res = client.table("listings").select("*") \
+                .eq("city", "Pune") \
+                .gte("price", prefs["budget_min"]) \
+                .lte("price", prefs["budget_max"]) \
+                .execute()
+            if _res.data:
+                raw_listings = _res.data   # now every dict has `id` (Supabase UUID)
+        except Exception as _e:
+            print(f"[pipeline] UUID re-fetch failed (image filter may skip rows): {_e}")
 
         # 4. Image filter
         from agents.image_filter_agent import filter_by_images
@@ -283,7 +293,7 @@ def facebook_token_login(request_body: dict, response: Response):
     # 2. Fetch user profile
     info = httpx.get(
         "https://graph.facebook.com/me",
-        params={"fields": "id,name,email,picture.type(large)", "access_token": access_token},
+        params={"fields": "id,name,picture.type(large)", "access_token": access_token},
         timeout=10,
     )
     info.raise_for_status()
@@ -439,10 +449,7 @@ def start_search(
     }
 
     # Run pipeline in background thread so endpoint returns immediately
-    background_tasks.add_task(
-        lambda: asyncio.run(asyncio.get_event_loop().run_in_executor(None, run_pipeline, session_id, prefs))
-        if False else run_pipeline(session_id, prefs)
-    )
+    background_tasks.add_task(run_pipeline, session_id, prefs)
 
     return {"session_id": session_id, "message": "Search started"}
 

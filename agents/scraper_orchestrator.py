@@ -22,13 +22,58 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 
 from rapidfuzz import fuzz
-from agents.scrapers.camoufox_scraper import scrape_all_with_camoufox
-from agents.scrapers.facebook_agent import scrape_facebook, scrape_groups_with_token
+from agents.scrapers.facebook_agent import scrape_facebook
 from agents.scrapers.base import save_listings
 
 DEDUP_THRESHOLD   = 85
 CACHE_MAX_AGE_H   = 6    # accept listings scraped within this many hours
 CACHE_MIN_COUNT   = 10   # if fewer than this, treat cache as empty
+
+
+# ── Per-site live scrape (cold cache path) ────────────────────────────────────
+def _live_scrape(prefs: dict) -> list[dict]:
+    """
+    Run all per-site scrapers for on-demand cold-cache path.
+    Uses direct APIs / curl_cffi (no browser) for speed.
+    Housing.com gets Camoufox if binary available.
+    """
+    from agents.scrapers.nobroker_api    import NoBrokerApiScraper
+    from agents.scrapers.magicbricks     import MagicBricksScraper
+    from agents.scrapers.squareyards     import SquareYardsScraper
+    from agents.scrapers.ninetynineacres import NinetyNineAcresScraper
+
+    scrapers = [
+        NoBrokerApiScraper(),        # direct JSON API — no bot detection
+        MagicBricksScraper(),        # SSR + Sec-Fetch headers
+        SquareYardsScraper(),        # curl_cffi Chrome impersonation
+        NinetyNineAcresScraper(),    # curl_cffi + city-wide supplement
+    ]
+
+    all_listings: list[dict] = []
+    for scraper in scrapers:
+        name = scraper.__class__.__name__
+        try:
+            results = scraper.scrape(prefs, max_pages=3)
+            print(f"  [orchestrator] {name}: {len(results)} listings")
+            all_listings.extend(results)
+        except Exception as e:
+            print(f"  [orchestrator] {name} error: {e}")
+
+    # Housing.com via Camoufox (Cloudflare — browser only)
+    areas = prefs.get("areas", [])
+    for area in areas[:2]:  # cap at 2 areas to limit browser time
+        try:
+            from agents.scrapers.camoufox_scraper import _scrape_url, _slug
+            housing_url = f"https://housing.com/in/rent/flats-in-{_slug(area)}-pune"
+            h = _scrape_url(housing_url, "housing")
+            for l in h:
+                l["city"] = "Pune"
+            all_listings.extend(h)
+            print(f"  [orchestrator] Housing.com ({area}): {len(h)} listings")
+        except Exception as e:
+            print(f"  [orchestrator] Housing.com error: {e}")
+
+    return all_listings
 
 
 # ── Supabase cache query ──────────────────────────────────────────────────────
@@ -119,23 +164,14 @@ def orchestrate(prefs: dict) -> list[dict]:
 
     # ── Facebook scraping (always runs — cache or live) ───────────────────────
     def _run_facebook():
-        fb_listings = []
-        # Prefer Graph API with user's long-lived token (no browser, no Camoufox)
-        user_token = prefs.get("user_fb_token", "")
-        if user_token:
-            try:
-                fb_listings = scrape_groups_with_token(user_token, prefs)
-                print(f"  [orchestrator] Facebook (Graph API): {len(fb_listings)} listings")
-            except Exception as e:
-                print(f"  [orchestrator] Facebook Graph API error: {e}")
-        # Fall back to Camoufox browser login (uses FB_EMAIL + FB_PASSWORD)
-        if not fb_listings:
-            try:
-                fb_listings = scrape_facebook(prefs)
-                print(f"  [orchestrator] Facebook (Camoufox): {len(fb_listings)} listings")
-            except Exception as e:
-                print(f"  [orchestrator] Facebook Camoufox error: {e}")
-        return fb_listings
+        # Graph API group feed endpoint removed by Meta April 2024 — use Camoufox only
+        try:
+            fb_listings = scrape_facebook(prefs)
+            print(f"  [orchestrator] Facebook (Camoufox): {len(fb_listings)} listings")
+            return fb_listings
+        except Exception as e:
+            print(f"  [orchestrator] Facebook Camoufox error: {e}")
+            return []
 
     if cache_ok:
         print(f"  [orchestrator] Cache warm ({len(cached)} listings). Running Facebook only.")
@@ -147,11 +183,11 @@ def orchestrate(prefs: dict) -> list[dict]:
             print(f"  [orchestrator] Facebook failed: {e}")
 
     else:
-        print("  [orchestrator] Cache miss. Running live Camoufox + Facebook.")
+        print("  [orchestrator] Cache miss. Running per-site scrapers + Facebook in parallel.")
         with ThreadPoolExecutor(max_workers=2) as executor:
             futures = {
-                executor.submit(scrape_all_with_camoufox, prefs, 1): "Camoufox",
-                executor.submit(_run_facebook):                       "Facebook",
+                executor.submit(_live_scrape, prefs): "scrapers",
+                executor.submit(_run_facebook):       "Facebook",
             }
             for future in as_completed(futures):
                 name = futures[future]

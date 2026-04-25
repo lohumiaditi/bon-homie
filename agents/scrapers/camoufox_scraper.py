@@ -35,13 +35,9 @@ from agents.scrapers.base import (
     CARD_SELECTORS,
 )
 
-# ── Top 20 Pune areas for GitHub Actions batch run ───────────────────────────
-TOP_20_AREAS = [
-    "Baner", "Kothrud", "Viman Nagar", "Koregaon Park", "Wakad",
-    "Hinjewadi", "Aundh", "Kalyani Nagar", "Hadapsar", "Magarpatta",
-    "Bavdhan", "Pimple Saudagar", "Shivajinagar", "Deccan", "Kharadi",
-    "Wagholi", "Undri", "Kondhwa", "Pimple Nilakh", "Pashan",
-]
+# ── All Pune areas for GitHub Actions batch run ───────────────────────────────
+from agents.pune_areas import ALL_PUNE_AREAS, TOP_AREAS
+TOP_20_AREAS = ALL_PUNE_AREAS   # full list — batch scrapes all ~60 localities
 
 # GitHub Actions batch budget range (broad — covers all listings)
 BATCH_BUDGET_MIN = 5_000
@@ -88,10 +84,7 @@ def _build_urls(area: str, lo: int, hi: int) -> list[dict]:
         },
         {
             "platform": "99acres",
-            "url": (
-                f"https://www.99acres.com/property-for-rent-in-{s}-9"
-                f"?search_type=rent&city=9&min_budget={lo}&max_budget={hi}"
-            ),
+            "url": f"https://www.99acres.com/property-for-rent-in-{s}-pune-ffid",
         },
         {
             "platform": "housing",
@@ -476,26 +469,24 @@ def _batch_with_camoufox():
 def _batch_with_site_scrapers():
     """
     Use per-site scrapers directly — one area at a time.
-    NoBroker uses internal JSON API (no bot detection).
-    Other sites use fetch_with_session() → cloudscraper fallback.
-    Works without Apify or Camoufox.
+    NoBroker: internal JSON API (no bot detection).
+    99acres, MagicBricks, SquareYards: curl_cffi / requests with Sec-Fetch headers.
+    Housing.com: Camoufox real browser (Cloudflare blocks all HTTP-only approaches).
+    Works without Apify.
     """
     from agents.scrapers.base import save_listings
-    from agents.scrapers.nobroker_api     import NoBrokerApiScraper   # uses internal JSON API
-    from agents.scrapers.ninetynineacres  import NinetyNineAcresScraper
-    from agents.scrapers.housing          import HousingScraper
-    from agents.scrapers.magicbricks      import MagicBricksScraper
-    from agents.scrapers.squareyards      import SquareYardsScraper
+    from agents.scrapers.nobroker_api  import NoBrokerApiScraper   # direct JSON API
+    from agents.scrapers.magicbricks   import MagicBricksScraper
+    from agents.scrapers.squareyards   import SquareYardsScraper
+    # 99acres + Housing.com excluded — SSR renders 1 card max; handled via Camoufox below
 
     scrapers = [
-        NoBrokerApiScraper(),     # direct API — no bot detection
-        NinetyNineAcresScraper(),
-        HousingScraper(),
+        NoBrokerApiScraper(),
         MagicBricksScraper(),
         SquareYardsScraper(),
     ]
 
-    print(f"[batch] Batch scrape: {len(TOP_20_AREAS)} areas × {len(scrapers)} sites")
+    print(f"[batch] Batch scrape: {len(TOP_20_AREAS)} areas × {len(scrapers) + 2} sites")
     print(f"[batch] Budget range: Rs.{BATCH_BUDGET_MIN} - Rs.{BATCH_BUDGET_MAX}")
 
     total_saved = 0
@@ -519,6 +510,28 @@ def _batch_with_site_scrapers():
             except Exception as e:
                 print(f"  [batch] {name}: error — {e}")
             time.sleep(random.uniform(1.5, 3.0))
+
+        # 99acres via Camoufox (SSR renders 1 card; needs real browser for full JS)
+        try:
+            acres_url = f"https://www.99acres.com/property-for-rent-in-{_slug(area)}-pune-ffid"
+            acres_listings = _scrape_url(acres_url, "99acres")
+            for l in acres_listings:
+                l["city"] = "Pune"
+            area_listings.extend(acres_listings)
+            print(f"  [batch] 99acres: {len(acres_listings)} listings (camoufox)")
+        except Exception as e:
+            print(f"  [batch] 99acres: error — {e}")
+
+        # Housing.com via Camoufox (Cloudflare blocks all HTTP-only approaches)
+        try:
+            housing_url = f"https://housing.com/in/rent/flats-in-{_slug(area)}-pune"
+            housing_listings = _scrape_url(housing_url, "housing")
+            for l in housing_listings:
+                l["city"] = "Pune"
+            area_listings.extend(housing_listings)
+            print(f"  [batch] housing: {len(housing_listings)} listings (camoufox)")
+        except Exception as e:
+            print(f"  [batch] housing: error — {e}")
 
         if area_listings:
             by_plat = {}

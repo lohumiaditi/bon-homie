@@ -100,33 +100,12 @@ BASE_URL = "https://www.nobroker.in"
 API_URL = f"{BASE_URL}/api/v3/multi/property/RENT/filter"
 ASSETS_URL = "https://assets.nobroker.in/images"
 
-# Lat/lng centroids for top 20 Pune rental areas
-AREA_COORDS = {
-    "Baner":            (18.5590, 73.7768),
-    "Kothrud":          (18.5074, 73.8077),
-    "Viman Nagar":      (18.5679, 73.9143),
-    "Koregaon Park":    (18.5362, 73.8938),
-    "Wakad":            (18.5988, 73.7611),
-    "Hinjewadi":        (18.5912, 73.7376),
-    "Aundh":            (18.5581, 73.8089),
-    "Kalyani Nagar":    (18.5460, 73.9050),
-    "Hadapsar":         (18.5018, 73.9260),
-    "Magarpatta":       (18.5090, 73.9316),
-    "Bavdhan":          (18.5198, 73.7857),
-    "Pimple Saudagar":  (18.6121, 73.7975),
-    "Shivajinagar":     (18.5308, 73.8474),
-    "Deccan":           (18.5163, 73.8442),
-    "Kharadi":          (18.5518, 73.9405),
-    "Wagholi":          (18.5726, 73.9745),
-    "Undri":            (18.4627, 73.8954),
-    "Kondhwa":          (18.4680, 73.8841),
-    "Pimple Nilakh":    (18.5966, 73.7873),
-    "Pashan":           (18.5367, 73.7953),
-}
+# Import comprehensive coords from shared module
+from agents.pune_areas import AREA_COORDS
 
-PAGE_SIZE = 20        # items per page
-SEARCH_RADIUS = 3000  # metres
-MAX_PAGES = 5         # cap per area to avoid hammering
+PAGE_SIZE = 20        # items per page (NoBroker API max)
+SEARCH_RADIUS = 4500  # metres — wider radius catches more listings
+MAX_PAGES = 10        # cap: 200 results/area max (uses total_count to stop early)
 
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
