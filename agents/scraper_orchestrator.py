@@ -59,12 +59,12 @@ def _live_scrape(prefs: dict) -> list[dict]:
         except Exception as e:
             print(f"  [orchestrator] {name} error: {e}")
 
-    # Housing.com via Camoufox (Cloudflare — browser only)
+    # Housing.com via Camoufox — correct canonical URL via typeAhead API
     areas = prefs.get("areas", [])
     for area in areas[:2]:  # cap at 2 areas to limit browser time
         try:
-            from agents.scrapers.camoufox_scraper import _scrape_url, _slug
-            housing_url = f"https://housing.com/in/rent/flats-in-{_slug(area)}-pune"
+            from agents.scrapers.camoufox_scraper import _scrape_url, _resolve_housing_url
+            housing_url = _resolve_housing_url(area)
             h = _scrape_url(housing_url, "housing")
             for l in h:
                 l["city"] = "Pune"

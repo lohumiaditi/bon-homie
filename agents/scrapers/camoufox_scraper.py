@@ -74,6 +74,72 @@ def _slug(area: str) -> str:
     return area.lower().replace(" ", "-")
 
 
+# In-process cache for resolved Housing.com canonical URLs
+_HOUSING_URL_CACHE: dict[str, str] = {}
+
+
+def _resolve_housing_url(area: str, city: str = "Pune") -> str:
+    """
+    Use Housing.com TypeAhead GQL API to get the correct canonical URL for an area.
+    Falls back to a constructed URL if the API fails.
+    Results cached in-process.
+    """
+    key = f"{area}|{city}".lower()
+    if key in _HOUSING_URL_CACHE:
+        return _HOUSING_URL_CACHE[key]
+
+    fallback = f"https://housing.com/in/rent/flats-in-{_slug(area)}-pune"
+
+    try:
+        import requests as _req, json as _json
+        payload = {
+            "query": (
+                "\n  query($searchQuery: SearchQueryInput!) {\n"
+                "    typeAhead(searchQuery: $searchQuery) {\n"
+                "      results { canonical }\n"
+                "      defaultUrl\n"
+                "    }\n  }\n"
+            ),
+            "variables": _json.dumps({
+                "searchQuery": {
+                    "name": f"{area} {city}",
+                    "service": "rent",
+                    "category": "residential",
+                },
+            }),
+        }
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:135.0) Gecko/20100101 Firefox/135.0",
+            "Accept": "*/*",
+            "Accept-Language": "en-IN,en;q=0.5",
+            "app-name": "desktop_web_buyer",
+            "phoenix-api-name": "TYPE_AHEAD_API",
+            "Content-Type": "application/json",
+            "Origin": "https://housing.com",
+            "Referer": "https://housing.com/in/rent",
+        }
+        r = _req.post(
+            "https://mightyzeus-mum.housing.com/api/gql/cache-first"
+            "?apiName=TYPE_AHEAD_API&emittedFrom=client_rent_home&isBot=false&platform=desktop",
+            json=payload,
+            headers=headers,
+            timeout=8,
+        )
+        data = r.json()
+        results = data.get("data", {}).get("typeAhead", {}).get("results", [])
+        canonical = results[0].get("canonical") if results else None
+        if canonical:
+            url = "https://housing.com" + canonical if canonical.startswith("/") else canonical
+            _HOUSING_URL_CACHE[key] = url
+            print(f"  [housing] resolved '{area}' -> {url}")
+            return url
+    except Exception as e:
+        print(f"  [housing] typeAhead lookup failed for '{area}': {e}")
+
+    _HOUSING_URL_CACHE[key] = fallback
+    return fallback
+
+
 def _build_urls(area: str, lo: int, hi: int) -> list[dict]:
     """Return list of {url, platform} dicts for one area across all 5 sites."""
     s = _slug(area)
@@ -88,7 +154,7 @@ def _build_urls(area: str, lo: int, hi: int) -> list[dict]:
         },
         {
             "platform": "housing",
-            "url": f"https://housing.com/in/rent/flats-in-{s}-pune",
+            "url": _resolve_housing_url(area),  # correct canonical via typeAhead API
         },
         {
             "platform": "magicbricks",
@@ -121,6 +187,16 @@ async def _scrape_url_async(url: str, platform: str) -> list[dict]:
 
         extra_wait = _EXTRA_WAIT_MS.get(platform, POST_LOAD_WAIT_MS)
         await page.wait_for_timeout(extra_wait)
+
+        # Early-exit: detect bot-block pages before wasting more time
+        title = await page.title()
+        early_html = await page.content()
+        if any(marker in title.lower() for marker in ("security alert", "access denied", "blocked", "just a moment")):
+            print(f"  [camoufox] {platform}: bot-block detected (title={title!r}) — skipping")
+            return []
+        if "Request Blocked" in early_html or "suspicious activity" in early_html:
+            print(f"  [camoufox] {platform}: bot-block detected in body — skipping")
+            return []
 
         if platform in _WAIT_SELECTORS:
             try:
@@ -522,9 +598,9 @@ def _batch_with_site_scrapers():
         except Exception as e:
             print(f"  [batch] 99acres: error — {e}")
 
-        # Housing.com via Camoufox (Cloudflare blocks all HTTP-only approaches)
+        # Housing.com via Camoufox — correct canonical URL via typeAhead API
         try:
-            housing_url = f"https://housing.com/in/rent/flats-in-{_slug(area)}-pune"
+            housing_url = _resolve_housing_url(area)
             housing_listings = _scrape_url(housing_url, "housing")
             for l in housing_listings:
                 l["city"] = "Pune"
