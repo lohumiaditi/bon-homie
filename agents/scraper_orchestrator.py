@@ -59,19 +59,8 @@ def _live_scrape(prefs: dict) -> list[dict]:
         except Exception as e:
             print(f"  [orchestrator] {name} error: {e}")
 
-    # Housing.com via Camoufox (Cloudflare — browser only)
-    areas = prefs.get("areas", [])
-    for area in areas[:2]:  # cap at 2 areas to limit browser time
-        try:
-            from agents.scrapers.camoufox_scraper import _scrape_url, _slug
-            housing_url = f"https://housing.com/in/rent/flats-in-{_slug(area)}-pune"
-            h = _scrape_url(housing_url, "housing")
-            for l in h:
-                l["city"] = "Pune"
-            all_listings.extend(h)
-            print(f"  [orchestrator] Housing.com ({area}): {len(h)} listings")
-        except Exception as e:
-            print(f"  [orchestrator] Housing.com error: {e}")
+    # Housing.com: BLOCKED — HTTP 406 "Security Alert" on all approaches.
+    # Requires residential proxy (Apify) to bypass. Skipped.
 
     return all_listings
 
