@@ -522,10 +522,16 @@ def _batch_with_site_scrapers():
         except Exception as e:
             print(f"  [batch] 99acres: error — {e}")
 
-        # Housing.com: BLOCKED — returns HTTP 406 "Security Alert" on all approaches
-        # (Camoufox, curl_cffi Chrome impersonation, plain requests all blocked).
-        # Requires residential proxy (Apify) to bypass. Skipped to save ~20min/run.
-        # TODO: re-enable when APIFY_KEY available and route Housing.com through Apify.
+        # Housing.com via Camoufox (Cloudflare blocks all HTTP-only approaches)
+        try:
+            housing_url = f"https://housing.com/in/rent/flats-in-{_slug(area)}-pune"
+            housing_listings = _scrape_url(housing_url, "housing")
+            for l in housing_listings:
+                l["city"] = "Pune"
+            area_listings.extend(housing_listings)
+            print(f"  [batch] housing: {len(housing_listings)} listings (camoufox)")
+        except Exception as e:
+            print(f"  [batch] housing: error — {e}")
 
         if area_listings:
             by_plat = {}
