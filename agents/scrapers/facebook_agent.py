@@ -191,10 +191,21 @@ async def _login_async(email: str, password: str) -> list:
         await page.wait_for_timeout(7_000)
 
         url = page.url
+        title = await page.title()
+        print(f"  [facebook] Post-login URL: {url[:80]} | title: {title[:60]}")
+
         if any(kw in url for kw in ("login", "checkpoint", "two_step", "recover")):
+            # Save diagnostic screenshot
+            try:
+                shot_path = os.path.join(os.path.dirname(__file__), "..", "..", ".fb_login_debug.png")
+                await page.screenshot(path=shot_path)
+                print(f"  [facebook] Screenshot saved: {shot_path}")
+            except Exception:
+                pass
             raise RuntimeError(
-                f"Facebook login failed or needs 2FA. URL: {url}\n"
-                "Fix: disable 2FA, or log in once manually from this IP."
+                f"Facebook login blocked. URL: {url}\n"
+                "Fix: run  python setup_fb_cookies.py  once to log in manually.\n"
+                "Cookies will be reused for all future runs."
             )
 
         print("  [facebook] Login successful.")
@@ -204,7 +215,7 @@ async def _login_async(email: str, password: str) -> list:
 
 
 def _get_session() -> list:
-    """Return cached cookies. Try disk → login fresh if needed."""
+    """Return cached cookies. Try disk → login fresh if needed. Returns [] if login fails."""
     global _SESSION_COOKIES
     if _SESSION_COOKIES:
         return _SESSION_COOKIES
@@ -218,14 +229,20 @@ def _get_session() -> list:
     # Fresh login
     email, password = _creds()
     if not email or not password:
-        raise RuntimeError("FB_EMAIL and FB_PASSWORD must be set in .env.")
+        print("  [facebook] FB_EMAIL/FB_PASSWORD not set — skipping Facebook.")
+        return []
 
-    def _run():
-        return asyncio.run(_login_async(email, password))
+    try:
+        def _run():
+            return asyncio.run(_login_async(email, password))
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-        _SESSION_COOKIES = ex.submit(_run).result(timeout=120)
-    return _SESSION_COOKIES
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            _SESSION_COOKIES = ex.submit(_run).result(timeout=120)
+        return _SESSION_COOKIES
+    except Exception as e:
+        print(f"  [facebook] Login failed: {e}")
+        print("  [facebook] Run  python setup_fb_cookies.py  to set up cookies manually.")
+        return []
 
 
 # ── Post text extraction helpers ──────────────────────────────────────────────
