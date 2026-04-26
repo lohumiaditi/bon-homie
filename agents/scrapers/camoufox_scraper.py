@@ -467,37 +467,47 @@ def run_batch_scrape():
     apify_key = os.environ.get("APIFY_KEY") or os.environ.get("APIFY_API_TOKEN", "")
 
     if apify_key:
-        _batch_with_apify()
+        apify_ok = _batch_with_apify()
+        if not apify_ok:
+            print("[batch] Apify failed — falling back to per-site scrapers")
+            _batch_with_site_scrapers()
     else:
-        print("[batch] No APIFY_KEY — using per-site scrapers with cloudscraper fallback")
+        print("[batch] No APIFY_KEY — using per-site scrapers")
         _batch_with_site_scrapers()
 
 
-def _batch_with_apify():
-    """Run all 20 areas × 5 sites in ONE Apify actor call."""
+def _batch_with_apify() -> bool:
+    """
+    Run all areas × 5 sites in ONE Apify actor call.
+    Returns True if Apify produced listings, False if it failed (triggers fallback).
+    """
     from agents.scrapers.apify_browser import scrape_batch_with_apify
     from agents.scrapers.base import save_listings
 
     print(f"[batch] Apify batch scrape: {len(TOP_20_AREAS)} areas × 5 sites")
     print(f"[batch] Budget range: Rs.{BATCH_BUDGET_MIN} - Rs.{BATCH_BUDGET_MAX}")
 
-    listings = scrape_batch_with_apify(TOP_20_AREAS, BATCH_BUDGET_MIN, BATCH_BUDGET_MAX)
+    try:
+        listings = scrape_batch_with_apify(TOP_20_AREAS, BATCH_BUDGET_MIN, BATCH_BUDGET_MAX)
+    except Exception as e:
+        print(f"[batch] Apify error: {e}")
+        return False
 
-    total_saved = 0
-    if listings:
-        by_plat = {}
-        for l in listings:
-            p = l.get("platform", "?")
-            by_plat[p] = by_plat.get(p, 0) + 1
-        print(f"[batch] By platform: {dict(sorted(by_plat.items()))}")
-        saved = save_listings(listings)
-        total_saved += saved
-        print(f"[batch] {saved} rows written to Supabase")
-    else:
-        print("[batch] Apify returned 0 listings")
+    if not listings:
+        print("[batch] Apify returned 0 listings — will use fallback scrapers")
+        return False
 
-    # Facebook (runs once regardless)
-    _batch_facebook(total_saved)
+    by_plat = {}
+    for l in listings:
+        p = l.get("platform", "?")
+        by_plat[p] = by_plat.get(p, 0) + 1
+    print(f"[batch] By platform: {dict(sorted(by_plat.items()))}")
+    saved = save_listings(listings)
+    print(f"[batch] {saved} rows written to Supabase")
+
+    # Facebook (runs after Apify succeeds)
+    _batch_facebook(saved)
+    return True
 
 
 def _batch_with_camoufox():
