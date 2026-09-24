@@ -27,3 +27,7 @@ Thumbs.db
 # Playwright
 playwright-report/
 test-results/
+
+# Facebook session cookies + login debug screenshot — account access, never commit
+.fb_cookies.json
+.fb_login_debug.png

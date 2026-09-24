@@ -2,6 +2,7 @@ import { useState } from 'react'
 import SearchForm from './components/SearchForm.jsx'
 import ResultsList from './components/ResultsList.jsx'
 import LoginButton from './components/LoginButton.jsx'
+import FacebookHub from './components/facebook/FacebookHub.jsx'
 import { useAuth } from './contexts/AuthContext.jsx'
 
 const API = '/api'
@@ -9,7 +10,7 @@ const API = '/api'
 export default function App() {
   const { user, loading } = useAuth()
   const [sessionId, setSessionId] = useState(null)
-  const [view, setView] = useState('form') // 'form' | 'results'
+  const [view, setView] = useState('form') // 'form' | 'results' | 'facebook'
 
   async function handleSearch(prefs) {
     const res = await fetch(`${API}/search`, {
@@ -75,24 +76,39 @@ export default function App() {
     <div className="min-h-screen bg-gray-50">
       {/* Header */}
       <header className="bg-white shadow-sm">
-        <div className="max-w-5xl mx-auto px-4 py-3 flex items-center gap-3">
+        <div className="max-w-5xl mx-auto px-4 py-3 flex flex-wrap items-center gap-3">
           <span className="text-3xl">🏠</span>
           <div>
             <h1 className="text-xl font-bold text-gray-900">Flat Hunter</h1>
             <p className="text-xs text-gray-500">Pune · Powered by AI agents</p>
           </div>
 
-          {view === 'results' && (
+          <nav className="order-last w-full sm:order-none sm:w-auto sm:ml-auto flex items-center gap-1">
+            {view === 'results' ? (
+              <button
+                onClick={() => { setView('form'); setSessionId(null) }}
+                className="text-sm text-blue-600 hover:underline px-2"
+              >
+                ← New Search
+              </button>
+            ) : (
+              <button
+                onClick={() => setView('form')}
+                className={`text-sm px-3 py-1.5 rounded-lg ${view === 'form' ? 'bg-blue-50 text-blue-700 font-semibold' : 'text-gray-600 hover:bg-gray-100'}`}
+              >
+                Search
+              </button>
+            )}
             <button
-              onClick={() => { setView('form'); setSessionId(null) }}
-              className="ml-auto mr-2 text-sm text-blue-600 hover:underline"
+              onClick={() => setView('facebook')}
+              className={`text-sm px-3 py-1.5 rounded-lg ${view === 'facebook' ? 'bg-blue-50 text-blue-700 font-semibold' : 'text-gray-600 hover:bg-gray-100'}`}
             >
-              ← New Search
+              Facebook leads
             </button>
-          )}
+          </nav>
 
-          {/* User avatar / logout — pushed to the right */}
-          <div className={view !== 'results' ? 'ml-auto' : ''}>
+          {/* User avatar / logout */}
+          <div className="ml-auto sm:ml-0">
             <LoginButton />
           </div>
         </div>
@@ -101,6 +117,7 @@ export default function App() {
       <main className="max-w-5xl mx-auto px-4 py-8">
         {view === 'form'    && <SearchForm onSearch={handleSearch} />}
         {view === 'results' && <ResultsList sessionId={sessionId} apiBase={API} />}
+        {view === 'facebook' && <FacebookHub />}
       </main>
     </div>
   )
