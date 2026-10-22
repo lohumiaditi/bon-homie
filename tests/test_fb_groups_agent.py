@@ -115,3 +115,83 @@ def test_expired_session_is_reported(rec, monkeypatch):
     assert report["session_expired"] is True
     assert invalidated == ["redirected to login"]
     assert "Reconnect" in report["errors"][0]
+
+
+# ── File state (--state data.json), as used by the daily artifact routine ─────
+
+@pytest.fixture
+def fake_browser(monkeypatch):
+    session = FacebookSession(parse_cookie_input("c_user=1; xs=2"), owner="system", source="env")
+    monkeypatch.setattr(agent, "load_session", lambda **kw: session)
+    monkeypatch.setattr(agent, "persist_session", lambda s: None)
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+
+    @asynccontextmanager
+    async def fake_open_page(s):
+        yield object()
+
+    async def no_pause(*a):
+        pass
+
+    feeds = []
+
+    async def group_search(page, query):
+        return parse_group_search(GROUP_SEARCH_HTML)
+
+    async def group_feed(page, url, max_posts):
+        feeds.append(url)
+        return "member", parse_feed_posts(FEED_HTML)
+
+    monkeypatch.setattr(browser, "open_page", fake_open_page)
+    monkeypatch.setattr(browser, "pause", no_pause)
+    monkeypatch.setattr(actions, "fetch_group_search", group_search)
+    monkeypatch.setattr(actions, "fetch_group_feed", group_feed)
+    return feeds
+
+
+def test_file_state_run(fake_browser, tmp_path):
+    import json
+    from agents.facebook.file_store import FileStore
+
+    path = tmp_path / "data.json"
+    report = agent.run_agent(None, ("discover", "harvest"), {}, store=FileStore(str(path)))
+    assert report["errors"] == []
+
+    data = json.loads(path.read_text())
+    assert data["schema"] == 1 and data["updated_at"]
+    groups = data["groups"]
+    assert groups["puneflatsnobroker"]["added_by"] == "discovered"
+    assert groups["puneflatsnobroker"]["member_count"] == 48_000
+    assert groups["puneflatrentals"]["added_by"] == "seed"
+    assert "https://www.facebook.com/groups/puneflatsnobroker/" in fake_browser   # discovered group gets read
+    assert len(data["leads"]) == 2 and all(l["found_at"] for l in data["leads"])
+    assert data["runs"][0]["leads_new"] == 2
+
+    # Second run: same posts → no duplicate leads; history grows; names survive re-seeding
+    groups["puneflatrentals"]["name"] = "Pune Flat Rentals (real name)"
+    path.write_text(json.dumps(data))
+    report = agent.run_agent(None, ("harvest",), {}, store=FileStore(str(path)))
+    data = json.loads(path.read_text())
+    assert report["leads_new"] == 0
+    assert len(data["leads"]) == 2 and len(data["runs"]) == 2
+    assert data["groups"]["puneflatrentals"]["name"] == "Pune Flat Rentals (real name)"
+
+
+def test_file_state_records_failed_run(monkeypatch, tmp_path):
+    import json
+    from agents.facebook.file_store import FileStore
+
+    monkeypatch.setattr(agent, "load_session", lambda **kw: None)
+    path = tmp_path / "data.json"
+    agent.run_agent(None, ("harvest",), {}, store=FileStore(str(path)))
+    run = json.loads(path.read_text())["runs"][0]
+    assert "No Facebook session" in run["errors"][0]
+
+
+def test_file_store_rejects_other_json(tmp_path):
+    from agents.facebook.file_store import FileStore
+
+    path = tmp_path / "x.json"
+    path.write_text('{"hello": 1}')
+    with pytest.raises(ValueError, match="state file"):
+        FileStore(str(path))

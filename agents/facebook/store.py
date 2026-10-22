@@ -150,15 +150,29 @@ def add_group_by_url(owner: str, url: str, added_by: str = "user") -> dict:
     return row
 
 
-def ensure_seed_groups(owner: str, urls: list[str]) -> None:
+def seed_rows(urls: list[str]) -> list[dict]:
     seeds = []
     for url in urls:
         key = group_key_from_url(url)
         if key:
             seeds.append({"group_key": key, "url": group_url(key), "name": key,
                           "relevance": score_group(key)})
-    rows = upsert_groups(seeds)
-    link_groups(owner, [r["id"] for r in rows.values()], "seed")
+    return seeds
+
+
+def ensure_seed_groups(owner: str, urls: list[str]) -> None:
+    """Add seed groups the catalog doesn't have yet (known ones keep their real names)."""
+    seeds = seed_rows(urls)
+    if not seeds:
+        return
+    client = _db()
+    known = {
+        r["group_key"]: r
+        for r in client.table("fb_groups").select("id,group_key")
+        .in_("group_key", [g["group_key"] for g in seeds]).execute().data or []
+    }
+    known.update(upsert_groups([g for g in seeds if g["group_key"] not in known]))
+    link_groups(owner, [r["id"] for r in known.values()], "seed")
 
 
 def list_user_groups(owner: str) -> list[dict]:
@@ -185,7 +199,7 @@ def update_user_group(owner: str, group_id: str, **fields) -> None:
     _db().table("fb_user_groups").update(fields).eq("owner_key", owner).eq("group_id", group_id).execute()
 
 
-def _worth_reading(g: dict) -> bool:
+def worth_reading(g: dict) -> bool:
     if not g.get("enabled", True) or g.get("membership") == "pending":
         return False
     if g.get("membership") == "not_member" and g.get("privacy") == "private":
@@ -195,21 +209,23 @@ def _worth_reading(g: dict) -> bool:
 
 def groups_for_harvest(owner: str, limit: int) -> list[dict]:
     """Readable groups, least recently harvested first."""
-    groups = [g for g in list_user_groups(owner) if _worth_reading(g)]
+    groups = [g for g in list_user_groups(owner) if worth_reading(g)]
     groups.sort(key=lambda g: g.get("last_harvested_at") or "")
     return groups[:limit]
 
 
-def groups_to_join(owner: str, limit: int, min_relevance: float) -> list[dict]:
-    """Relevant groups the account isn't in and hasn't asked to join yet."""
-    candidates = [
-        g for g in list_user_groups(owner)
-        if g.get("enabled", True)
+def join_candidate(g: dict, min_relevance: float) -> bool:
+    return (
+        g.get("enabled", True)
         and g.get("membership") in ("not_member", "unknown")
         and not g.get("join_requested_at")
         and (g.get("relevance") or 0) >= min_relevance
-    ]
-    return candidates[:limit]
+    )
+
+
+def groups_to_join(owner: str, limit: int, min_relevance: float) -> list[dict]:
+    """Relevant groups the account isn't in and hasn't asked to join yet."""
+    return [g for g in list_user_groups(owner) if join_candidate(g, min_relevance)][:limit]
 
 
 # ── Leads ─────────────────────────────────────────────────────────────────────
@@ -241,6 +257,12 @@ def list_leads(owner: str, status: str | None = None, limit: int = 100) -> list[
     if status:
         query = query.eq("status", status)
     return query.order("created_at", desc=True).limit(limit).execute().data or []
+
+
+def save_listings(listings: list[dict]) -> int:
+    """Priced leads also go to the listings table so searches pick them up."""
+    from agents.scrapers.base import save_listings as _save
+    return _save(listings)
 
 
 def update_lead(owner: str, lead_id: str, **fields) -> dict | None:

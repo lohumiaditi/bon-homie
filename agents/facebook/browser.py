@@ -1,18 +1,26 @@
 """
 Facebook browser plumbing
 -------------------------
-One Camoufox browser per run (not one per page), with the session's cookies
-loaded. Every navigation checks for the login wall so a dead session fails
-fast with FacebookSessionExpired instead of silently scraping a login page.
+One browser per run (not one per page), with the session's cookies loaded.
+Every navigation checks for the login wall so a dead session fails fast with
+FacebookSessionExpired instead of silently scraping a login page.
 
-FB_HEADLESS=0 shows the browser window (useful when debugging selectors).
+Browser: Camoufox (anti-fingerprinting Firefox) when its binary is installed,
+otherwise Playwright Chromium — e.g. in Claude cloud sessions, where Camoufox's
+GitHub-hosted binary can't be downloaded but Chromium is pre-installed.
+
+  FB_BROWSER=camoufox|chromium   force one (default: try Camoufox, fall back)
+  FB_CHROMIUM_PATH=/path/chrome  Chromium binary (default: Playwright's, or
+                                 /opt/pw-browsers/chromium when present)
+  FB_HEADLESS=0                  show the window (debugging selectors)
 """
 
 import asyncio
+import glob
 import os
 import random
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 
 from agents.facebook.parsing import is_login_wall
 from agents.facebook.session import FacebookSession, FacebookSessionExpired
@@ -22,6 +30,11 @@ POST_LOAD_WAIT_MS = 4_500
 SCROLL_PAUSE_MS = 1_500
 
 HEADLESS = os.environ.get("FB_HEADLESS", "1") != "0"
+
+_CHROME_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+)
 
 
 def run_sync(coro_factory, timeout: float):
@@ -41,6 +54,55 @@ async def pause(min_ms: int, max_ms: int) -> None:
     await asyncio.sleep(random.randint(min_ms, max_ms) / 1000)
 
 
+def _chromium_path() -> str | None:
+    if os.environ.get("FB_CHROMIUM_PATH"):
+        return os.environ["FB_CHROMIUM_PATH"]
+    for candidate in ("/opt/pw-browsers/chromium", *glob.glob("/opt/pw-browsers/chromium-*/chrome-linux/chrome")):
+        if os.path.exists(candidate):
+            return candidate
+    return None   # Playwright's own download
+
+
+async def _camoufox_page(stack: AsyncExitStack):
+    from camoufox.async_api import AsyncCamoufox
+    browser = await stack.enter_async_context(AsyncCamoufox(headless=HEADLESS, geoip=True))
+    return await browser.new_page()
+
+
+async def _chromium_page(stack: AsyncExitStack):
+    from playwright.async_api import async_playwright
+    pw = await stack.enter_async_context(async_playwright())
+    options = {"headless": HEADLESS, "args": ["--disable-blink-features=AutomationControlled"]}
+    if _chromium_path():
+        options["executable_path"] = _chromium_path()
+    proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+    if proxy:
+        options["proxy"] = {"server": proxy}
+    browser = await pw.chromium.launch(**options)
+    stack.push_async_callback(browser.close)
+    context = await browser.new_context(
+        user_agent=_CHROME_UA,
+        locale="en-IN",
+        timezone_id="Asia/Kolkata",
+        viewport={"width": 1366, "height": 900},
+    )
+    await context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+    return await context.new_page()
+
+
+async def _launch(stack: AsyncExitStack):
+    choice = os.environ.get("FB_BROWSER", "auto").lower()
+    if choice == "chromium":
+        return await _chromium_page(stack)
+    try:
+        return await _camoufox_page(stack)
+    except Exception as e:
+        if choice == "camoufox":
+            raise
+        print(f"  [facebook] Camoufox unavailable ({e.__class__.__name__}); using Chromium.")
+        return await _chromium_page(stack)
+
+
 @asynccontextmanager
 async def open_page(session: FacebookSession):
     """
@@ -48,10 +110,8 @@ async def open_page(session: FacebookSession):
     replaced with the browser's current cookies (Facebook rotates some), so
     callers can save them with session.persist_session(session).
     """
-    from camoufox.async_api import AsyncCamoufox
-
-    async with AsyncCamoufox(headless=HEADLESS, geoip=True) as browser:
-        page = await browser.new_page()
+    async with AsyncExitStack() as stack:
+        page = await _launch(stack)
         await page.context.add_cookies(session.cookies)
         yield page
         try:
@@ -81,11 +141,9 @@ async def scroll(page, times: int, pause_ms: int = SCROLL_PAUSE_MS) -> None:
 
 async def login_with_password(email: str, password: str) -> list[dict]:
     """Automated email/password login. Returns cookies; raises when Facebook blocks it."""
-    from camoufox.async_api import AsyncCamoufox
-
     print("  [facebook] Logging in to Facebook with FB_EMAIL/FB_PASSWORD...")
-    async with AsyncCamoufox(headless=HEADLESS, geoip=True) as browser:
-        page = await browser.new_page()
+    async with AsyncExitStack() as stack:
+        page = await _launch(stack)
         await page.goto("https://www.facebook.com/login", timeout=PAGE_TIMEOUT_MS,
                         wait_until="domcontentloaded")
         await page.wait_for_timeout(2_500)

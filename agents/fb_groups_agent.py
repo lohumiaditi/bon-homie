@@ -14,12 +14,16 @@ Keeps a Facebook account's rental-group pipeline fed:
 
 It never posts, comments or messages anyone.
 
+Where state lives: Supabase (agents/facebook/store.py) by default, or one
+JSON file with --state (agents/facebook/file_store.py) — no database needed.
+
 Run:
   python -m agents.fb_groups_agent run                   # system account
   python -m agents.fb_groups_agent run --user <uuid>     # one connected user
   python -m agents.fb_groups_agent run --all             # system + every connected user
+  python -m agents.fb_groups_agent run --state data.json # system account, file state
   python -m agents.fb_groups_agent discover --dry-run --areas Baner,Wakad
-  (--tasks discover,join,harvest picks tasks for "run"; --dry-run skips the database)
+  (--tasks discover,join,harvest picks tasks for "run"; --dry-run writes nothing)
 """
 
 import argparse
@@ -100,8 +104,9 @@ def lead_from_listing(listing: dict, post: dict, group: dict | None, source: str
 
 
 # ── Tasks ─────────────────────────────────────────────────────────────────────
+# `st` is the state store (store module or FileStore); None means dry run.
 
-async def _discover(page, owner: str, prefs: dict, report: RunReport, dry_run: bool) -> None:
+async def _discover(page, st, owner: str, prefs: dict, report: RunReport) -> None:
     from agents.facebook.actions import fetch_group_search
     from agents.facebook.browser import pause
 
@@ -125,25 +130,23 @@ async def _discover(page, owner: str, prefs: dict, report: RunReport, dry_run: b
         key=lambda g: g["relevance"], reverse=True,
     )
     report.groups_found = len(found)
-    if dry_run:
+    if st is None:
         for g in relevant:
             print(f"    {g['relevance']:>5}  {g['name'][:60]:60}  {g.get('member_count') or '?':>8}  {g['url']}")
         report.groups_added = len(relevant)
         return
 
-    from agents.facebook import store
-    rows = store.upsert_groups(relevant)
-    report.groups_added = store.link_groups(owner, [r["id"] for r in rows.values()], "discovered")
+    rows = st.upsert_groups(relevant)
+    report.groups_added = st.link_groups(owner, [r["id"] for r in rows.values()], "discovered")
 
 
-async def _join(page, owner: str, report: RunReport, dry_run: bool) -> None:
+async def _join(page, st, owner: str, report: RunReport) -> None:
     from agents.facebook.actions import join_group
     from agents.facebook.browser import pause
 
-    if dry_run:
+    if st is None:
         return
-    from agents.facebook import store
-    for g in store.groups_to_join(owner, MAX_JOINS_PER_RUN, JOIN_MIN_RELEVANCE):
+    for g in st.groups_to_join(owner, MAX_JOINS_PER_RUN, JOIN_MIN_RELEVANCE):
         try:
             state = await join_group(page, g["url"], JOIN_ANSWER)
         except FacebookSessionError:
@@ -155,21 +158,20 @@ async def _join(page, owner: str, report: RunReport, dry_run: bool) -> None:
         if state != "member":
             fields["join_requested_at"] = datetime.now(timezone.utc).isoformat()
             report.joins_requested.append(g.get("name") or g["group_key"])
-        store.update_user_group(owner, g["id"], **fields)
+        st.update_user_group(owner, g["id"], **fields)
         await pause(20_000, 45_000)
 
 
-async def _harvest(page, owner: str, report: RunReport, dry_run: bool) -> None:
+async def _harvest(page, st, owner: str, report: RunReport) -> None:
     from agents.facebook.actions import fetch_group_feed
     from agents.facebook.browser import pause
     from agents.scrapers.facebook_agent import PUNE_RENTAL_GROUPS
 
-    if dry_run:
+    if st is None:
         groups = [{"id": None, "url": u, "group_key": group_key_from_url(u)} for u in PUNE_RENTAL_GROUPS[:3]]
     else:
-        from agents.facebook import store
-        store.ensure_seed_groups(owner, PUNE_RENTAL_GROUPS)
-        groups = store.groups_for_harvest(owner, MAX_GROUPS_PER_HARVEST)
+        st.ensure_seed_groups(owner, PUNE_RENTAL_GROUPS)
+        groups = st.groups_for_harvest(owner, MAX_GROUPS_PER_HARVEST)
 
     for g in groups:
         try:
@@ -191,37 +193,34 @@ async def _harvest(page, owner: str, report: RunReport, dry_run: bool) -> None:
             if listing.get("price"):
                 listings.append(listing)
 
-        if dry_run:
+        if st is None:
             for lead in leads:
                 print(f"    Rs.{lead['price'] or '?':>7}  {lead['area_name'] or '':15}  "
                       f"{lead['contact'] or '':14}  {lead['text'][:60]}")
             report.leads_new += len(leads)
         else:
-            from agents.facebook import store
-            from agents.scrapers.base import save_listings
-            new = store.save_leads(owner, leads)
+            new = st.save_leads(owner, leads)
             report.leads_new += new
             if listings:
-                report.listings_saved += save_listings(listings)
+                report.listings_saved += st.save_listings(listings)
             fields = {
                 "last_harvested_at": datetime.now(timezone.utc).isoformat(),
                 "leads_found": (g.get("leads_found") or 0) + new,
             }
             if membership != "unknown":
                 fields["membership"] = membership
-            store.update_user_group(owner, g["id"], **fields)
+            st.update_user_group(owner, g["id"], **fields)
         await pause(3_000, 7_000)
 
 
 # ── Runner ────────────────────────────────────────────────────────────────────
 
-def _join_allowed(user_id: str | None, dry_run: bool) -> bool:
-    if dry_run:
+def _join_allowed(st, user_id: str | None) -> bool:
+    if st is None:
         return False
     if user_id is None:
         return os.environ.get("FB_AUTO_JOIN") == "1"
-    from agents.facebook import store
-    return bool((store.get_connection(user_id) or {}).get("auto_join"))
+    return bool((st.get_connection(user_id) or {}).get("auto_join"))
 
 
 def run_agent(
@@ -229,9 +228,21 @@ def run_agent(
     tasks=DEFAULT_TASKS,
     prefs: dict | None = None,
     dry_run: bool = False,
+    store=None,
 ) -> dict:
-    """Run the agent for one account. Returns the run report as a dict."""
+    """
+    Run the agent for one account. Returns the run report as a dict.
+    `store` defaults to Supabase (agents.facebook.store); pass a FileStore to
+    keep state in a file. dry_run reads Facebook but writes nothing.
+    """
     from agents.facebook.browser import open_page, run_sync
+
+    if dry_run:
+        st = None
+    elif store is not None:
+        st = store
+    else:
+        from agents.facebook import store as st
 
     tasks = [t for t in TASKS if t in tasks]
     owner = user_id or SYSTEM_OWNER
@@ -241,18 +252,18 @@ def run_agent(
     if session is None:
         report.errors.append("No Facebook session for this account. Connect Facebook first.")
     else:
-        if "join" in tasks and not _join_allowed(user_id, dry_run):
+        if "join" in tasks and not _join_allowed(st, user_id):
             tasks.remove("join")
             report.tasks = tasks
 
         async def _run():
             async with open_page(session) as page:
                 if "discover" in tasks:
-                    await _discover(page, owner, prefs or {}, report, dry_run)
+                    await _discover(page, st, owner, prefs or {}, report)
                 if "join" in tasks:
-                    await _join(page, owner, report, dry_run)
+                    await _join(page, st, owner, report)
                 if "harvest" in tasks:
-                    await _harvest(page, owner, report, dry_run)
+                    await _harvest(page, st, owner, report)
 
         try:
             run_sync(_run, timeout=RUN_TIMEOUT_S)
@@ -268,10 +279,12 @@ def run_agent(
 
     report.finished_at = datetime.now(timezone.utc).isoformat()
     result = asdict(report)
-    if user_id and not dry_run:
+    if st is not None:
         try:
-            from agents.facebook import store
-            store.update_connection(user_id, last_run_at=report.finished_at, last_run_summary=result)
+            if hasattr(st, "finish_run"):
+                st.finish_run(result)
+            elif user_id:
+                st.update_connection(user_id, last_run_at=report.finished_at, last_run_summary=result)
         except Exception as e:
             print(f"  [fb-agent] Couldn't save run summary: {e}")
     return result
@@ -297,6 +310,7 @@ def main(argv=None) -> int:
     parser.add_argument("--all", action="store_true", help="system account + every connected user")
     parser.add_argument("--tasks", default=",".join(DEFAULT_TASKS), help="for 'run': comma-separated tasks")
     parser.add_argument("--areas", default="", help="comma-separated areas to focus discovery on")
+    parser.add_argument("--state", help="keep state in this JSON file instead of Supabase (system account)")
     parser.add_argument("--dry-run", action="store_true", help="print results, write nothing")
     args = parser.parse_args(argv)
 
@@ -306,8 +320,13 @@ def main(argv=None) -> int:
         parser.error(f"unknown task(s): {', '.join(sorted(unknown))}")
     prefs = {"areas": [a.strip() for a in args.areas.split(",") if a.strip()]}
 
+    if args.state and (args.all or args.user):
+        parser.error("--state runs the system account only; don't combine it with --all or --user")
     if args.all:
         results = run_all(tasks)
+    elif args.state:
+        from agents.facebook.file_store import FileStore
+        results = [run_agent(None, tasks, prefs, dry_run=args.dry_run, store=FileStore(args.state))]
     else:
         results = [run_agent(args.user, tasks, prefs, dry_run=args.dry_run)]
     print(json.dumps(results, indent=2))

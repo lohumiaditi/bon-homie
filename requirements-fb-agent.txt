@@ -1,0 +1,8 @@
+# Minimal deps for the Facebook groups agent with --state (no database), e.g.
+# the daily Claude routine. Camoufox is optional: without it the agent uses
+# Playwright Chromium (pre-installed in Claude cloud sessions).
+beautifulsoup4==4.13.4
+python-dotenv==1.1.0
+requests==2.33.0
+httpx>=0.27.0
+playwright>=1.48
