@@ -1,0 +1,46 @@
+name: Facebook Groups Agent
+
+# Finds new Pune rental groups and collects leads from group posts, for the
+# system account (FB_COOKIES_JSON) and every user who connected Facebook.
+on:
+  schedule:
+    - cron: '30 */6 * * *'    # every 6 hours UTC, offset from the listings scrape
+  workflow_dispatch:
+    inputs:
+      tasks:
+        description: 'Comma-separated: discover, join, harvest'
+        default: 'discover,harvest'
+
+concurrency:
+  group: facebook-agent
+  cancel-in-progress: false
+
+jobs:
+  agent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Download Camoufox browser binary
+        run: python -m camoufox fetch
+
+      - name: Run groups agent (all accounts)
+        run: python -m agents.fb_groups_agent run --all --tasks "$AGENT_TASKS"
+        env:
+          AGENT_TASKS: ${{ github.event.inputs.tasks || 'discover,harvest' }}
+
+    env:
+      SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+      ENCRYPTION_KEY:       ${{ secrets.ENCRYPTION_KEY }}
+      FB_COOKIES_JSON:      ${{ secrets.FB_COOKIES_JSON }}

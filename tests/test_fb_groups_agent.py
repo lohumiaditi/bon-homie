@@ -1,0 +1,197 @@
+"""run_agent() end-to-end with a fake browser page and in-memory store — pytest tests/test_fb_groups_agent.py"""
+
+import os
+import sys
+from contextlib import asynccontextmanager
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+import pytest
+
+import agents.fb_groups_agent as agent
+from agents.facebook import actions, browser, store
+from agents.facebook import session as fb_session
+from agents.facebook.parsing import parse_feed_posts, parse_group_search
+from agents.facebook.session import FacebookSession, FacebookSessionExpired, parse_cookie_input
+from tests.test_facebook_parsing import FEED_HTML, GROUP_SEARCH_HTML
+
+
+class Recorder:
+    def __init__(self):
+        self.groups, self.links, self.leads, self.listings = {}, [], [], []
+        self.group_updates, self.connection = {}, {"auto_join": False}
+
+    def upsert_groups(self, groups):
+        for g in groups:
+            self.groups[g["group_key"]] = {**g, "id": "id-" + g["group_key"]}
+        return {g["group_key"]: self.groups[g["group_key"]] for g in groups}
+
+    def link_groups(self, owner, ids, added_by):
+        self.links += [(owner, i, added_by) for i in ids]
+        return len(ids)
+
+    def ensure_seed_groups(self, owner, urls):
+        pass
+
+    def groups_for_harvest(self, owner, limit):
+        return [{"id": "g1", "url": "https://www.facebook.com/groups/puneflats/", "leads_found": 2}]
+
+    def save_leads(self, owner, leads):
+        self.leads += leads
+        return len(leads)
+
+    def update_user_group(self, owner, gid, **fields):
+        self.group_updates[gid] = fields
+
+    def get_connection(self, uid):
+        return self.connection
+
+    def update_connection(self, uid, **fields):
+        self.connection.update(fields)
+
+
+@pytest.fixture
+def rec(monkeypatch):
+    rec = Recorder()
+    for name in ("upsert_groups", "link_groups", "ensure_seed_groups", "groups_for_harvest",
+                 "save_leads", "update_user_group", "get_connection", "update_connection"):
+        monkeypatch.setattr(store, name, getattr(rec, name))
+
+    session = FacebookSession(parse_cookie_input("c_user=1; xs=2"), owner="u1", source="user")
+    monkeypatch.setattr(agent, "load_session", lambda **kw: session)
+    monkeypatch.setattr(agent, "persist_session", lambda s: None)
+
+    @asynccontextmanager
+    async def fake_open_page(s):
+        yield object()
+
+    async def no_pause(*a):
+        pass
+
+    async def group_search(page, query):
+        return parse_group_search(GROUP_SEARCH_HTML)
+
+    async def group_feed(page, url, max_posts):
+        return "member", parse_feed_posts(FEED_HTML)
+
+    monkeypatch.setattr(browser, "open_page", fake_open_page)
+    monkeypatch.setattr(browser, "pause", no_pause)
+    monkeypatch.setattr(actions, "fetch_group_search", group_search)
+    monkeypatch.setattr(actions, "fetch_group_feed", group_feed)
+
+    import agents.scrapers.base as base
+    monkeypatch.setattr(base, "save_listings", lambda ls: rec.listings.extend(ls) or len(ls))
+    return rec
+
+
+def test_discover_and_harvest(rec):
+    report = agent.run_agent("u1", ("discover", "join", "harvest"), {"areas": ["Baner"]})
+
+    assert report["errors"] == []
+    assert report["tasks"] == ["discover", "harvest"]            # join dropped: auto_join off
+    assert report["groups_found"] == 3
+    assert list(rec.groups) == ["puneflatsnobroker"]              # only the relevant group kept
+    assert rec.links == [("u1", "id-puneflatsnobroker", "discovered")]
+
+    assert report["posts_seen"] == 3
+    assert report["leads_new"] == 2                               # seeker post skipped
+    assert {l["post_id"] for l in rec.leads} == {"1234567890123", rec.leads[1]["post_id"]}
+    assert rec.leads[0]["group_id"] == "g1" and rec.leads[0]["contact"] == "+919876543210"
+    assert report["listings_saved"] == 2                          # both leads have a price
+    assert rec.group_updates["g1"]["membership"] == "member"
+    assert rec.group_updates["g1"]["leads_found"] == 4
+    assert rec.connection["last_run_summary"]["leads_new"] == 2
+
+
+def test_expired_session_is_reported(rec, monkeypatch):
+    async def expired(page, url, max_posts):
+        raise FacebookSessionExpired("redirected to login")
+
+    invalidated = []
+    monkeypatch.setattr(actions, "fetch_group_feed", expired)
+    monkeypatch.setattr(agent, "invalidate_session", lambda s, reason: invalidated.append(reason))
+
+    report = agent.run_agent("u1", ("harvest",))
+    assert report["session_expired"] is True
+    assert invalidated == ["redirected to login"]
+    assert "Reconnect" in report["errors"][0]
+
+
+# ── File state (--state data.json), as used by the daily artifact routine ─────
+
+@pytest.fixture
+def fake_browser(monkeypatch):
+    session = FacebookSession(parse_cookie_input("c_user=1; xs=2"), owner="system", source="env")
+    monkeypatch.setattr(agent, "load_session", lambda **kw: session)
+    monkeypatch.setattr(agent, "persist_session", lambda s: None)
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+
+    @asynccontextmanager
+    async def fake_open_page(s):
+        yield object()
+
+    async def no_pause(*a):
+        pass
+
+    feeds = []
+
+    async def group_search(page, query):
+        return parse_group_search(GROUP_SEARCH_HTML)
+
+    async def group_feed(page, url, max_posts):
+        feeds.append(url)
+        return "member", parse_feed_posts(FEED_HTML)
+
+    monkeypatch.setattr(browser, "open_page", fake_open_page)
+    monkeypatch.setattr(browser, "pause", no_pause)
+    monkeypatch.setattr(actions, "fetch_group_search", group_search)
+    monkeypatch.setattr(actions, "fetch_group_feed", group_feed)
+    return feeds
+
+
+def test_file_state_run(fake_browser, tmp_path):
+    import json
+    from agents.facebook.file_store import FileStore
+
+    path = tmp_path / "data.json"
+    report = agent.run_agent(None, ("discover", "harvest"), {}, store=FileStore(str(path)))
+    assert report["errors"] == []
+
+    data = json.loads(path.read_text())
+    assert data["schema"] == 1 and data["updated_at"]
+    groups = data["groups"]
+    assert groups["puneflatsnobroker"]["added_by"] == "discovered"
+    assert groups["puneflatsnobroker"]["member_count"] == 48_000
+    assert groups["puneflatrentals"]["added_by"] == "seed"
+    assert "https://www.facebook.com/groups/puneflatsnobroker/" in fake_browser   # discovered group gets read
+    assert len(data["leads"]) == 2 and all(l["found_at"] for l in data["leads"])
+    assert data["runs"][0]["leads_new"] == 2
+
+    # Second run: same posts → no duplicate leads; history grows; names survive re-seeding
+    groups["puneflatrentals"]["name"] = "Pune Flat Rentals (real name)"
+    path.write_text(json.dumps(data))
+    report = agent.run_agent(None, ("harvest",), {}, store=FileStore(str(path)))
+    data = json.loads(path.read_text())
+    assert report["leads_new"] == 0
+    assert len(data["leads"]) == 2 and len(data["runs"]) == 2
+    assert data["groups"]["puneflatrentals"]["name"] == "Pune Flat Rentals (real name)"
+
+
+def test_file_state_records_failed_run(monkeypatch, tmp_path):
+    import json
+    from agents.facebook.file_store import FileStore
+
+    monkeypatch.setattr(agent, "load_session", lambda **kw: None)
+    path = tmp_path / "data.json"
+    agent.run_agent(None, ("harvest",), {}, store=FileStore(str(path)))
+    run = json.loads(path.read_text())["runs"][0]
+    assert "No Facebook session" in run["errors"][0]
+
+
+def test_file_store_rejects_other_json(tmp_path):
+    from agents.facebook.file_store import FileStore
+
+    path = tmp_path / "x.json"
+    path.write_text('{"hello": 1}')
+    with pytest.raises(ValueError, match="state file"):
+        FileStore(str(path))

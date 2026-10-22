@@ -1,0 +1,630 @@
+<title>Pune Flat Leads</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=IBM+Plex+Mono:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: a lead inbox (filters + cards) beside a narrow rail for agent health, run history and groups; one column on phones */
+:root {
+  --bg: #F2F5F4;
+  --surface: #FFFFFF;
+  --ink: #16211D;
+  --muted: #5A6A64;
+  --line: #DAE3DF;
+  --accent: #0B6B75;
+  --accent-soft: #DCEEEF;
+  --on-accent: #FFFFFF;
+  --marigold: #B87A00;
+  --marigold-soft: #FBF0D6;
+  --ok: #1D7A4C;
+  --ok-soft: #E0F2E7;
+  --warn: #9A6200;
+  --warn-soft: #FAEFD6;
+  --bad: #B3261E;
+  --bad-soft: #FBE3E1;
+  --wa: #1A8A4A;
+  --font-display: "Bricolage Grotesque", "Avenir Next", "Segoe UI", system-ui, sans-serif;
+  --font-body: "IBM Plex Sans", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  --radius: 10px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0D1412; --surface: #151E1B; --ink: #E2EBE7; --muted: #95A69F; --line: #26332E;
+    --accent: #5CC0C9; --accent-soft: #123438; --on-accent: #06211F;
+    --marigold: #E6B44C; --marigold-soft: #3A2C0E;
+    --ok: #5CC48B; --ok-soft: #12321F; --warn: #E3AE4A; --warn-soft: #382A0F;
+    --bad: #F08A80; --bad-soft: #3D1A17; --wa: #42C07A;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0D1412; --surface: #151E1B; --ink: #E2EBE7; --muted: #95A69F; --line: #26332E;
+  --accent: #5CC0C9; --accent-soft: #123438; --on-accent: #06211F;
+  --marigold: #E6B44C; --marigold-soft: #3A2C0E;
+  --ok: #5CC48B; --ok-soft: #12321F; --warn: #E3AE4A; --warn-soft: #382A0F;
+  --bad: #F08A80; --bad-soft: #3D1A17; --wa: #42C07A;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 15px;
+  line-height: 1.5;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 24px 48px;
+}
+.wrap { max-width: 1160px; margin: 0 auto; display: grid; gap: 20px; }
+a { color: var(--accent); }
+button, input, select { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+/* Header */
+header.top { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px 24px; }
+.brand { min-width: 0; flex: 1 1 320px; }
+.brand h1 {
+  font-family: var(--font-display); font-weight: 700; font-size: clamp(28px, 4vw, 38px);
+  line-height: 1.05; margin: 0; letter-spacing: -0.01em; text-wrap: balance;
+}
+.brand p { margin: 6px 0 0; color: var(--muted); max-width: 60ch; }
+
+.status {
+  display: flex; gap: 10px; align-items: flex-start; padding: 12px 14px; border-radius: var(--radius);
+  border: 1px solid var(--line); background: var(--surface); flex: 1 1 360px; min-width: 0;
+}
+.status .dot { width: 10px; height: 10px; border-radius: 50%; margin-top: 6px; flex: none; background: var(--muted); }
+.status[data-tone="ok"] { background: var(--ok-soft); border-color: transparent; }
+.status[data-tone="ok"] .dot { background: var(--ok); }
+.status[data-tone="warn"] { background: var(--warn-soft); border-color: transparent; }
+.status[data-tone="warn"] .dot { background: var(--warn); }
+.status[data-tone="bad"] { background: var(--bad-soft); border-color: transparent; }
+.status[data-tone="bad"] .dot { background: var(--bad); }
+.status strong { display: block; font-weight: 600; }
+.status span { color: var(--muted); font-size: 13.5px; }
+
+.example-note {
+  padding: 10px 14px; border-radius: var(--radius); background: var(--marigold-soft);
+  color: var(--ink); font-size: 14px; border: 1px dashed var(--marigold);
+}
+
+/* Summary strip */
+.summary { display: flex; flex-wrap: wrap; gap: 8px 28px; padding: 4px 2px; }
+.summary div { display: flex; align-items: baseline; gap: 8px; }
+.summary b { font-family: var(--font-mono); font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.summary span { color: var(--muted); font-size: 13.5px; }
+
+/* Main grid */
+.main { display: grid; gap: 20px; grid-template-columns: minmax(0, 1fr); align-items: start; }
+@media (min-width: 960px) { .main { grid-template-columns: minmax(0, 1fr) 320px; } }
+
+/* Filters */
+.filters { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 14px; }
+.tabs { display: flex; flex-wrap: wrap; gap: 4px; background: var(--surface); border: 1px solid var(--line); border-radius: 999px; padding: 3px; }
+.tabs button {
+  border: 0; background: transparent; padding: 6px 12px; border-radius: 999px; cursor: pointer;
+  font-size: 13.5px; color: var(--muted); font-weight: 500;
+}
+.tabs button[aria-pressed="true"] { background: var(--accent); color: var(--on-accent); }
+.tabs button .c { font-family: var(--font-mono); font-size: 12px; margin-left: 4px; opacity: 0.8; }
+.field { display: flex; align-items: center; gap: 6px; font-size: 13.5px; color: var(--muted); }
+.field select, .field input[type="number"], .field input[type="search"] {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; color: var(--ink); min-width: 0;
+}
+.field input[type="number"] { width: 110px; }
+.field input[type="search"] { width: 170px; }
+.field input[type="checkbox"] { accent-color: var(--accent); width: 16px; height: 16px; }
+
+/* Lead cards */
+.leads { display: grid; gap: 12px; }
+.lead {
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 14px 16px; display: grid; gap: 8px; min-width: 0;
+}
+.lead.is-example { border-style: dashed; }
+.lead-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; }
+.rent { font-family: var(--font-mono); font-weight: 600; font-size: 18px; font-variant-numeric: tabular-nums; }
+.rent small { font-family: var(--font-body); font-weight: 400; font-size: 13px; color: var(--muted); }
+.rent.none { font-family: var(--font-body); font-size: 15px; color: var(--muted); font-weight: 500; }
+.area { font-weight: 600; }
+.when { margin-left: auto; color: var(--muted); font-size: 13px; white-space: nowrap; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--ink); }
+.chip.fresh { background: var(--marigold-soft); color: var(--marigold); font-weight: 600; }
+.chip.example { background: var(--marigold-soft); color: var(--marigold); font-weight: 600; }
+.text { margin: 0; white-space: pre-line; overflow-wrap: anywhere; }
+.text.clamp { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+.more { border: 0; background: none; padding: 0; color: var(--accent); cursor: pointer; font-size: 13px; justify-self: start; }
+.lead-foot { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.btn {
+  display: inline-flex; align-items: center; gap: 6px; border-radius: 8px; padding: 6px 12px;
+  font-size: 13.5px; font-weight: 600; text-decoration: none; cursor: pointer; border: 1px solid var(--line);
+  background: var(--surface); color: var(--ink);
+}
+.btn:hover { border-color: var(--accent); }
+.btn.wa { background: var(--wa); border-color: var(--wa); color: var(--on-accent); }
+.phone { font-family: var(--font-mono); font-size: 13.5px; user-select: all; }
+.copy { border: 0; background: none; color: var(--accent); cursor: pointer; font-size: 12.5px; padding: 2px 4px; }
+.meta { color: var(--muted); font-size: 13px; }
+.meta a { color: var(--muted); }
+.triage { margin-left: auto; display: flex; gap: 4px; flex-wrap: wrap; }
+.triage button {
+  border: 1px solid transparent; background: none; border-radius: 6px; padding: 4px 8px; font-size: 13px;
+  color: var(--muted); cursor: pointer;
+}
+.triage button:hover { border-color: var(--line); color: var(--ink); }
+.triage button:disabled { cursor: not-allowed; opacity: 0.5; }
+.badge { font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 999px; }
+.badge.shortlisted { background: var(--marigold-soft); color: var(--marigold); }
+.badge.contacted { background: var(--accent-soft); color: var(--accent); }
+.badge.dismissed { background: var(--line); color: var(--muted); }
+.empty { padding: 28px 16px; text-align: center; color: var(--muted); background: var(--surface); border: 1px dashed var(--line); border-radius: var(--radius); }
+.notice { font-size: 13.5px; color: var(--bad); }
+
+/* Rail */
+aside { display: grid; gap: 16px; min-width: 0; }
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; min-width: 0; }
+.panel h2 { font-family: var(--font-display); font-size: 17px; font-weight: 600; margin: 0 0 10px; }
+.panel .sub { color: var(--muted); font-size: 13px; margin: -6px 0 10px; }
+.chart svg { width: 100%; height: auto; display: block; }
+.chart .axis { fill: var(--muted); font-family: var(--font-mono); font-size: 10px; }
+.chart .grid { stroke: var(--line); stroke-width: 1; }
+.chart .bar { fill: var(--accent); }
+.chart .bar.err { fill: var(--bad); }
+.chart .bar.last { fill: var(--marigold); }
+.groups { list-style: none; margin: 0; padding: 0; display: grid; }
+.groups li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 10px; padding: 8px 0; border-top: 1px solid var(--line); }
+.groups li:first-child { border-top: 0; }
+.groups a { color: var(--ink); text-decoration: none; font-weight: 500; overflow-wrap: anywhere; }
+.groups a:hover { color: var(--accent); }
+.groups .g-meta { grid-column: 1; color: var(--muted); font-size: 12.5px; }
+.groups .g-leads { grid-row: 1 / span 2; grid-column: 2; align-self: center; text-align: right; font-family: var(--font-mono); font-size: 15px; font-weight: 600; }
+.groups .g-leads small { display: block; font-family: var(--font-body); font-weight: 400; font-size: 11px; color: var(--muted); }
+.howto { font-size: 13.5px; color: var(--muted); }
+.howto h2 { color: var(--ink); }
+.howto p { margin: 0 0 8px; }
+.howto code { font-family: var(--font-mono); font-size: 12.5px; background: var(--accent-soft); color: var(--ink); padding: 1px 4px; border-radius: 4px; overflow-wrap: anywhere; }
+
+@media (max-width: 520px) {
+  .when { margin-left: 0; width: 100%; }
+  .triage { margin-left: 0; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .lead { transition: border-color .15s; }
+}
+</style>
+
+<div class="wrap">
+  <header class="top">
+    <div class="brand">
+      <h1>Pune Flat Leads</h1>
+      <p>Rental offers pulled from Pune Facebook groups every morning at 7:30 IST. Posts from people who are looking for a flat are left out.</p>
+    </div>
+    <div class="status" id="status" data-tone="idle" role="status">
+      <div class="dot"></div>
+      <div><strong id="status-title">Loading the latest run…</strong><span id="status-detail"></span></div>
+    </div>
+  </header>
+
+  <div class="example-note" id="example-note" hidden>
+    These are <strong>example leads</strong> to show how the page works. Real leads appear here after the first daily run collects them.
+  </div>
+
+  <section class="summary" id="summary" aria-label="Summary"></section>
+
+  <div class="main">
+    <section aria-label="Leads">
+      <div class="filters">
+        <div class="tabs" id="tabs" role="group" aria-label="Status"></div>
+        <label class="field" for="f-area">Area
+          <select id="f-area"><option value="">All areas</option></select>
+        </label>
+        <label class="field" for="f-max">Max rent ₹
+          <input id="f-max" type="number" inputmode="numeric" min="0" step="1000" placeholder="any">
+        </label>
+        <label class="field" for="f-phone"><input id="f-phone" type="checkbox"> Has phone</label>
+        <label class="field" for="f-q"><input id="f-q" type="search" placeholder="Search text"></label>
+      </div>
+      <p class="notice" id="db-notice" hidden></p>
+      <div class="leads" id="leads"></div>
+    </section>
+
+    <aside>
+      <div class="panel chart">
+        <h2>New leads per run</h2>
+        <p class="sub" id="chart-sub">Last 14 runs</p>
+        <div id="chart"></div>
+      </div>
+      <div class="panel">
+        <h2>Groups</h2>
+        <p class="sub" id="groups-sub"></p>
+        <ul class="groups" id="groups"></ul>
+      </div>
+      <div class="panel howto">
+        <h2>How this updates</h2>
+        <p>A Claude routine runs daily. It finds new Pune rental groups, reads the newest posts in the best ones, keeps the posts offering a flat or room, and republishes this page. It never posts, comments or messages anyone.</p>
+        <p>It reads Facebook as the account in the <code>FB_COOKIES_JSON</code> variable of the Claude cloud environment. If the status says the session expired, export fresh cookies and replace that variable.</p>
+        <p>Shortlisted, contacted and dismissed marks are saved for everyone who opens this page.</p>
+      </div>
+    </aside>
+  </div>
+</div>
+
+<script>
+(() => {
+  const EXAMPLE = {
+    schema: 1, updated_at: null, runs: [],
+    groups: {
+      "puneflatsnobroker": { group_key: "puneflatsnobroker", name: "Pune Flats & Flatmates (example)", url: "https://www.facebook.com/groups/puneflatsnobroker/", member_count: 48000, privacy: "public", membership: "member", leads_found: 2, added_by: "discovered", enabled: true, relevance: 11.7 },
+      "puneflatrentals": { group_key: "puneflatrentals", name: "puneflatrentals", url: "https://www.facebook.com/groups/puneflatrentals/", member_count: null, privacy: null, membership: "unknown", leads_found: 1, added_by: "seed", enabled: true, relevance: 2 }
+    },
+    leads: [
+      { example: true, post_id: "ex1", group_id: "puneflatsnobroker", url: "", price: 22000, area_name: "Baner", furnishing: "semi-furnished", gender: null, brokerage: false, contact: "+919800000001", poster_name: "Example poster", poster_url: "", images: ["x", "x", "x"], found_at: new Date().toISOString(),
+        text: "2BHK flat available for rent in Baner near Balewadi High Street. Rent: 22,000. Deposit 60,000. Semi furnished, family preferred, no brokerage. Call 98000 00001." },
+      { example: true, post_id: "ex2", group_id: "puneflatsnobroker", url: "", price: 9000, area_name: "Wakad", furnishing: "furnished", gender: "female", brokerage: null, contact: "", poster_name: "Example poster", poster_url: "", images: [], found_at: new Date(Date.now() - 864e5).toISOString(),
+        text: "Looking for a flatmate (working women) for my 2BHK in Wakad, 5 min from Hinjewadi phase 1. Rent 9000 per head, fully furnished. DM for details." },
+      { example: true, post_id: "ex3", group_id: "puneflatrentals", url: "", price: null, area_name: "Kothrud", furnishing: null, gender: null, brokerage: null, contact: "+919800000002", poster_name: "Example poster", poster_url: "", images: ["x"], found_at: new Date(Date.now() - 3 * 864e5).toISOString(),
+        text: "1RK available for bachelors near Karishma Society, Kothrud. Immediate possession. Contact 98000 00002." }
+    ]
+  };
+
+  const STATUSES = [
+    { id: "new", label: "New" },
+    { id: "shortlisted", label: "Shortlisted" },
+    { id: "contacted", label: "Contacted" },
+    { id: "dismissed", label: "Dismissed" },
+    { id: "all", label: "All" }
+  ];
+  const ACTIONS = {
+    new: ["shortlisted", "contacted", "dismissed"],
+    shortlisted: ["contacted", "dismissed"],
+    contacted: ["shortlisted", "dismissed"],
+    dismissed: ["new"]
+  };
+  const ACTION_LABEL = { shortlisted: "★ Shortlist", contacted: "✓ Contacted", dismissed: "Dismiss", new: "Restore" };
+  const DOC_ID = /^[A-Za-z0-9_\-.~:@+]{1,200}$/;
+
+  const state = {
+    data: null, example: false, triage: {}, expanded: new Set(),
+    filter: { status: "new", area: "", max: "", phone: false, q: "" },
+    db: null, userId: null, canWrite: null, dbNote: ""
+  };
+
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const safeFb = (u) => (typeof u === "string" && /^https:\/\/(www|m|web)\.facebook\.com\//.test(u)) ? u : "";
+  const rupees = (n) => "₹" + Number(n).toLocaleString("en-IN");
+  const ist = new Intl.DateTimeFormat("en-IN", { timeZone: "Asia/Kolkata", day: "numeric", month: "short", hour: "numeric", minute: "2-digit" });
+  const istDay = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" });
+  const istTime = new Intl.DateTimeFormat("en-IN", { timeZone: "Asia/Kolkata", hour: "numeric", minute: "2-digit" });
+
+  function whenLabel(iso) {
+    if (!iso) return "";
+    const d = new Date(iso);
+    const days = Math.round((new Date(istDay.format(new Date())) - new Date(istDay.format(d))) / 864e5);
+    if (days === 0) return "Today, " + istTime.format(d);
+    if (days === 1) return "Yesterday, " + istTime.format(d);
+    if (days < 7) return days + " days ago";
+    return ist.format(d);
+  }
+  function members(n) {
+    if (!n) return "";
+    if (n >= 1e6) return (n / 1e6).toFixed(1) + "M members";
+    if (n >= 1e3) return Math.round(n / 1e3) + "K members";
+    return n + " members";
+  }
+  function waLink(contact, lead) {
+    const digits = String(contact).replace(/\D/g, "");
+    const msg = "Hi! I saw your rental post" + (lead.area_name ? " for " + lead.area_name : "") +
+      (lead.price ? " at " + rupees(lead.price) + "/month" : "") + " on Facebook. Is it still available?";
+    return "https://wa.me/" + digits + "?text=" + encodeURIComponent(msg);
+  }
+  const statusOf = (lead) => state.triage[lead.post_id] || "new";
+  function phoneLabel(contact) {
+    const m = String(contact).match(/^\+91(\d{5})(\d{5})$/);
+    return m ? `+91 ${m[1]} ${m[2]}` : String(contact);
+  }
+
+  // ── Status band ────────────────────────────────────────────────────────────
+  function renderStatus() {
+    const el = $("status");
+    const runs = state.data.runs || [];
+    const latest = runs[0];
+    let tone = "ok", title, detail = "";
+    if (!latest) {
+      tone = "idle"; title = "No runs yet";
+      detail = "The first run collects real leads from Facebook groups.";
+    } else {
+      const errs = latest.errors || [];
+      const ageH = (Date.now() - new Date(latest.finished_at || latest.started_at)) / 36e5;
+      const when = whenLabel(latest.finished_at || latest.started_at);
+      if (latest.session_expired) {
+        tone = "bad"; title = "Facebook logged the agent out";
+        detail = "Last run " + when + ". Export fresh cookies and replace FB_COOKIES_JSON in the Claude environment.";
+      } else if (errs.some((e) => /No Facebook session/i.test(e))) {
+        tone = "bad"; title = "No Facebook account connected";
+        detail = "Last run " + when + ". Add FB_COOKIES_JSON to the Claude cloud environment's variables.";
+      } else if (ageH > 30) {
+        tone = "warn"; title = "Last run was " + Math.floor(ageH / 24) + " day" + (ageH >= 48 ? "s" : "") + " ago";
+        detail = "The daily routine may be paused or failing. Check Routines in Claude.";
+      } else {
+        title = "Updated " + when;
+        detail = latest.leads_new + " new lead" + (latest.leads_new === 1 ? "" : "s") + " from " +
+          latest.groups_harvested + " group" + (latest.groups_harvested === 1 ? "" : "s") +
+          (latest.groups_added ? ", " + latest.groups_added + " new group" + (latest.groups_added === 1 ? "" : "s") + " found" : "");
+        if (errs.length) { tone = "warn"; detail += ". " + errs.length + " problem" + (errs.length === 1 ? "" : "s") + ": " + errs[0]; }
+      }
+    }
+    el.dataset.tone = tone;
+    $("status-title").textContent = title;
+    $("status-detail").textContent = detail;
+  }
+
+  // ── Summary ────────────────────────────────────────────────────────────────
+  function renderSummary() {
+    const leads = state.data.leads || [];
+    const latest = (state.data.runs || [])[0];
+    const fresh = latest ? leads.filter((l) => l.found_at >= latest.started_at).length : 0;
+    const count = (s) => leads.filter((l) => statusOf(l) === s).length;
+    const items = [
+      [latest ? fresh : "–", "new this morning"],
+      [count("new"), "to review"],
+      [count("shortlisted"), "shortlisted"],
+      [count("contacted"), "contacted"],
+      [Object.values(state.data.groups || {}).filter((g) => g.added_by && g.enabled !== false).length, "groups watched"]
+    ];
+    $("summary").innerHTML = items.map(([n, label]) => `<div><b>${esc(n)}</b><span>${esc(label)}</span></div>`).join("");
+  }
+
+  // ── Filters ────────────────────────────────────────────────────────────────
+  function renderTabs() {
+    const leads = state.data.leads || [];
+    const counts = { all: leads.length };
+    for (const l of leads) counts[statusOf(l)] = (counts[statusOf(l)] || 0) + 1;
+    $("tabs").innerHTML = STATUSES.map((s) =>
+      `<button type="button" data-status="${s.id}" aria-pressed="${state.filter.status === s.id}">${s.label}<span class="c">${counts[s.id] || 0}</span></button>`
+    ).join("");
+  }
+  function fillAreas() {
+    const counts = {};
+    for (const l of state.data.leads || []) if (l.area_name) counts[l.area_name] = (counts[l.area_name] || 0) + 1;
+    const sel = $("f-area");
+    const current = state.filter.area;
+    sel.innerHTML = `<option value="">All areas</option>` + Object.entries(counts)
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .map(([a, n]) => `<option value="${esc(a)}">${esc(a)} (${n})</option>`).join("");
+    sel.value = counts[current] ? current : "";
+  }
+  function visibleLeads() {
+    const f = state.filter;
+    const max = Number(f.max) || 0;
+    const q = f.q.trim().toLowerCase();
+    return (state.data.leads || []).filter((l) =>
+      (f.status === "all" || statusOf(l) === f.status) &&
+      (!f.area || l.area_name === f.area) &&
+      (!max || (l.price && l.price <= max)) &&
+      (!f.phone || l.contact) &&
+      (!q || (l.text || "").toLowerCase().includes(q) || (l.area_name || "").toLowerCase().includes(q))
+    );
+  }
+
+  // ── Leads ──────────────────────────────────────────────────────────────────
+  function leadCard(l) {
+    const groups = state.data.groups || {};
+    const g = groups[l.group_id] || {};
+    const latest = (state.data.runs || [])[0];
+    const status = statusOf(l);
+    const fresh = latest && l.found_at >= latest.started_at;
+    const chips = [
+      l.example ? `<span class="chip example">Example</span>` : "",
+      fresh ? `<span class="chip fresh">New this morning</span>` : "",
+      l.furnishing ? `<span class="chip">${esc(l.furnishing)}</span>` : "",
+      l.gender ? `<span class="chip">${esc(l.gender)} only</span>` : "",
+      l.occupancy ? `<span class="chip">${esc(l.occupancy)} occupancy</span>` : "",
+      l.brokerage === false ? `<span class="chip">No brokerage</span>` : ""
+    ].join("");
+    const postUrl = safeFb(l.url);
+    const posterUrl = safeFb(l.poster_url);
+    const photos = (l.images || []).length;
+    const long = (l.text || "").length > 260;
+    const expanded = state.expanded.has(l.post_id);
+    const canTriage = !l.example && state.db && state.canWrite !== false && DOC_ID.test(l.post_id);
+    const actions = (ACTIONS[status] || []).map((s) =>
+      `<button type="button" data-act="${s}" data-id="${esc(l.post_id)}" ${canTriage ? "" : "disabled"}>${ACTION_LABEL[s]}</button>`
+    ).join("");
+
+    return `<article class="lead${l.example ? " is-example" : ""}">
+      <div class="lead-head">
+        ${l.price ? `<span class="rent">${rupees(l.price)} <small>/ month</small></span>` : `<span class="rent none">Rent not stated</span>`}
+        <span class="area">${esc(l.area_name || "Pune")}</span>
+        ${status !== "new" ? `<span class="badge ${status}">${esc(ACTION_LABEL[status].replace(/^[★✓] /, ""))}</span>` : ""}
+        <span class="when">${esc(whenLabel(l.found_at))}</span>
+      </div>
+      ${chips ? `<div class="chips">${chips}</div>` : ""}
+      <p class="text${long && !expanded ? " clamp" : ""}">${esc(l.text)}</p>
+      ${long ? `<button type="button" class="more" data-more="${esc(l.post_id)}">${expanded ? "Show less" : "Show the whole post"}</button>` : ""}
+      <div class="lead-foot">
+        ${l.contact ? `<a class="btn wa" href="${waLink(l.contact, l)}" target="_blank" rel="noopener">WhatsApp</a>
+          <span class="phone">${esc(phoneLabel(l.contact))}</span><button type="button" class="copy" data-copy="${esc(l.contact)}">Copy</button>` : ""}
+        ${postUrl ? `<a class="btn" href="${postUrl}" target="_blank" rel="noopener">Open post${photos ? " · " + photos + " photo" + (photos === 1 ? "" : "s") : ""}</a>` : ""}
+        <span class="meta">${posterUrl ? `by <a href="${posterUrl}" target="_blank" rel="noopener">${esc(l.poster_name || "poster")}</a>` : (l.poster_name ? "by " + esc(l.poster_name) : "")}${g.name ? (l.poster_name ? " in " : "in ") + esc(g.name) : ""}</span>
+        <span class="triage">${actions}</span>
+      </div>
+    </article>`;
+  }
+  function renderLeads() {
+    const list = visibleLeads();
+    const box = $("leads");
+    if (!list.length) {
+      const any = (state.data.leads || []).length;
+      box.innerHTML = `<div class="empty">${any ? "No leads match these filters." : "No leads yet. The next run adds rental offers from the groups on the right."}</div>`;
+      return;
+    }
+    box.innerHTML = list.slice(0, 300).map(leadCard).join("") +
+      (list.length > 300 ? `<div class="empty">Showing the newest 300 of ${list.length}. Narrow the filters to see others.</div>` : "");
+  }
+
+  // ── Rail ───────────────────────────────────────────────────────────────────
+  function renderChart() {
+    const runs = (state.data.runs || []).slice(0, 14).reverse();
+    const box = $("chart");
+    if (!runs.length) { box.innerHTML = `<p class="sub">Each run adds a bar here.</p>`; $("chart-sub").textContent = ""; return; }
+    const W = 300, H = 120, L = 26, B = 18, T = 8;
+    const max = Math.max(4, ...runs.map((r) => r.leads_new || 0));
+    const step = Math.ceil(max / 4);
+    const top = step * 4;
+    const y = (v) => T + (H - T - B) * (1 - v / top);
+    const bw = (W - L - 4) / 14;
+    let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="New leads per run, last ${runs.length} runs">`;
+    for (let v = 0; v <= top; v += step) {
+      svg += `<line class="grid" x1="${L}" x2="${W - 2}" y1="${y(v)}" y2="${y(v)}"/><text class="axis" x="${L - 5}" y="${y(v) + 3}" text-anchor="end">${v}</text>`;
+    }
+    runs.forEach((r, i) => {
+      const v = r.leads_new || 0;
+      const x = L + 4 + i * bw;
+      const failed = r.session_expired || (r.errors || []).some((e) => /No Facebook session/i.test(e));
+      const h = Math.max(failed ? 3 : 0, y(0) - y(v));
+      const cls = failed ? "bar err" : (i === runs.length - 1 ? "bar last" : "bar");
+      svg += `<rect class="${cls}" x="${x.toFixed(1)}" y="${(y(0) - h).toFixed(1)}" width="${(bw - 4).toFixed(1)}" height="${h.toFixed(1)}" rx="2"><title>${esc(whenLabel(r.finished_at || r.started_at))}: ${v} new${failed ? " (failed)" : ""}</title></rect>`;
+    });
+    const first = runs[0], last = runs[runs.length - 1];
+    svg += `<text class="axis" x="${L + 4}" y="${H - 4}">${esc(istDay.format(new Date(first.started_at)).slice(5))}</text>`;
+    svg += `<text class="axis" x="${W - 2}" y="${H - 4}" text-anchor="end">${esc(istDay.format(new Date(last.started_at)).slice(5))}</text>`;
+    box.innerHTML = svg + "</svg>";
+    $("chart-sub").textContent = `Last ${runs.length} run${runs.length === 1 ? "" : "s"}. Red bars are runs that couldn't log in.`;
+  }
+  function renderGroups() {
+    const groups = Object.values(state.data.groups || {}).filter((g) => g.added_by);
+    groups.sort((a, b) => (b.leads_found || 0) - (a.leads_found || 0) || (b.relevance || 0) - (a.relevance || 0));
+    const memberLabel = { member: "member", pending: "join requested", not_member: "not a member", unknown: "membership not checked" };
+    $("groups-sub").textContent = groups.length ? `${groups.length} groups, most productive first` : "Groups appear after the first run.";
+    $("groups").innerHTML = groups.slice(0, 25).map((g) => {
+      const url = safeFb(g.url);
+      const meta = [members(g.member_count), g.privacy, memberLabel[g.membership], g.added_by === "seed" ? "starter list" : ""].filter(Boolean).join(" · ");
+      return `<li>
+        ${url ? `<a href="${url}" target="_blank" rel="noopener">${esc(g.name || g.group_key)}</a>` : `<span>${esc(g.name || g.group_key)}</span>`}
+        <span class="g-leads">${g.leads_found || 0}<small>leads</small></span>
+        <span class="g-meta">${esc(meta)}</span>
+      </li>`;
+    }).join("");
+  }
+
+  function render() {
+    renderStatus(); renderSummary(); renderTabs(); renderLeads(); renderChart(); renderGroups();
+    $("example-note").hidden = !state.example;
+    const note = $("db-notice");
+    note.hidden = !state.dbNote;
+    note.textContent = state.dbNote;
+  }
+
+  // ── Events ─────────────────────────────────────────────────────────────────
+  $("tabs").addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-status]");
+    if (!b) return;
+    state.filter.status = b.dataset.status;
+    renderTabs(); renderLeads();
+  });
+  $("f-area").addEventListener("change", (e) => { state.filter.area = e.target.value; renderLeads(); });
+  $("f-max").addEventListener("input", (e) => { state.filter.max = e.target.value; renderLeads(); });
+  $("f-phone").addEventListener("change", (e) => { state.filter.phone = e.target.checked; renderLeads(); });
+  $("f-q").addEventListener("input", (e) => { state.filter.q = e.target.value; renderLeads(); });
+
+  $("leads").addEventListener("click", async (e) => {
+    const more = e.target.closest("[data-more]");
+    if (more) {
+      const id = more.dataset.more;
+      state.expanded.has(id) ? state.expanded.delete(id) : state.expanded.add(id);
+      renderLeads();
+      return;
+    }
+    const copy = e.target.closest("[data-copy]");
+    if (copy) {
+      try { await navigator.clipboard.writeText(copy.dataset.copy); copy.textContent = "Copied"; }
+      catch {
+        const phone = copy.previousElementSibling;
+        const range = document.createRange(); range.selectNodeContents(phone);
+        const sel = getSelection(); sel.removeAllRanges(); sel.addRange(range);
+        copy.textContent = "Selected";
+      }
+      setTimeout(() => { copy.textContent = "Copy"; }, 1500);
+      return;
+    }
+    const act = e.target.closest("button[data-act]");
+    if (act && !act.disabled) setTriage(act.dataset.id, act.dataset.act);
+  });
+
+  async function setTriage(postId, status) {
+    if (!state.db || !DOC_ID.test(postId)) return;
+    const before = state.triage[postId];
+    state.triage = { ...state.triage, [postId]: status };
+    state.dbNote = "";
+    render();
+    try {
+      await state.db.collection("triage").doc(postId).set({ status, at: new Date().toISOString(), by: state.userId });
+    } catch (err) {
+      const t = { ...state.triage };
+      if (before) t[postId] = before; else delete t[postId];
+      state.triage = t;
+      if (err && err.code === "invalid_argument") {
+        state.canWrite = false;
+        state.dbNote = "You can view this page but not change lead marks. Ask the owner for Contributor access.";
+      } else if (err && err.code === "quota_exceeded") {
+        state.dbNote = "The page's storage is full, so the mark wasn't saved.";
+      } else {
+        state.dbNote = "That mark wasn't saved. Check your connection and try again.";
+      }
+      render();
+    }
+  }
+
+  // ── Load ───────────────────────────────────────────────────────────────────
+  async function loadData() {
+    try {
+      const res = await fetch("data.json", { cache: "no-store" });
+      if (res.ok) {
+        const d = await res.json();
+        if (d && d.schema === 1) return d;
+      }
+    } catch {}
+    return null;
+  }
+
+  async function connectDb() {
+    const claude = window.claude;
+    if (!claude || typeof claude.use !== "function") return;
+    const [db, user] = await Promise.all([claude.use("db"), claude.use("user")]);
+    if (user) {
+      state.userId = await user.id();
+      state.canWrite = await user.can("data.write");
+    }
+    if (!db) { render(); return; }
+    state.db = db;
+    db.collection("triage").onSnapshot((snap) => {
+      const t = {};
+      for (const d of snap.docs) {
+        const v = d.data();
+        if (v && typeof v.status === "string" && ACTIONS[v.status]) t[d.id] = v.status;
+      }
+      state.triage = t;
+      render();
+    }, () => {
+      state.dbNote = "Lead marks couldn't be loaded right now. Reload the page to try again.";
+      render();
+    });
+    render();
+  }
+
+  (async () => {
+    const data = await loadData();
+    state.example = !data || !(data.runs || []).length;
+    state.data = state.example ? { ...EXAMPLE, runs: (data && data.runs) || [] } : data;
+    fillAreas();
+    render();
+    connectDb();
+  })();
+})();
+</script>

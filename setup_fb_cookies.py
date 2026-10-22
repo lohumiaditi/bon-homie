@@ -1,17 +1,22 @@
 """
 One-time Facebook cookie setup.
-Opens a VISIBLE browser window → you log in manually → cookies saved to .fb_cookies.json
-After this, the scraper reuses cookies and never needs to log in again.
+Opens a VISIBLE browser window → you log in manually → cookies saved to
+FB_COOKIES_PATH (default .fb_cookies.json), which local runs use automatically.
+
+The same cookies can also be:
+  - pasted into "Connect Facebook" in the web app, or
+  - stored as the FB_COOKIES_JSON GitHub secret for scheduled runs
+    (python setup_fb_cookies.py --print shows the compact value to paste).
 
 Run:
-    python setup_fb_cookies.py
+    python setup_fb_cookies.py [--print]
 """
 import sys, os, asyncio, json
 sys.path.insert(0, os.path.dirname(__file__))
 from dotenv import load_dotenv
 load_dotenv()
 
-FB_COOKIES_PATH = os.path.join(os.path.dirname(__file__), ".fb_cookies.json")
+from agents.facebook.session import FB_COOKIES_PATH
 
 async def setup():
     from camoufox.async_api import AsyncCamoufox
@@ -65,7 +70,13 @@ async def setup():
 
         print(f"Saved {len(cookies)} cookies to {FB_COOKIES_PATH}")
         print()
-        print("Done. The scraper will now use these cookies automatically.")
+        print("Done. Local scraper runs will use these cookies automatically.")
         print("Re-run this script if the scraper reports login errors again.")
+        print("Don't log out of Facebook in that window — logging out kills these cookies.")
+        if "--print" in sys.argv:
+            essentials = [c for c in cookies if c["name"] in ("c_user", "xs", "datr", "fr", "sb")]
+            print()
+            print("Paste this into Connect Facebook, or save it as the FB_COOKIES_JSON secret:")
+            print(json.dumps(essentials))
 
 asyncio.run(setup())
